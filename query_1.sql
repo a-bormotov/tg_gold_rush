@@ -5,15 +5,14 @@ WITH agg AS (
   GROUP BY ur."userId"
 )
 SELECT 
-  a."userId",
   CASE 
     WHEN u.username = 'Secret Dino' OR u.username IS NULL OR u.username = '' 
       THEN a."userId"::text
     ELSE u.username
   END AS username,
-  a.gold
+  a.gold,
+  a."userId"
 FROM agg a
 LEFT JOIN users u ON u.id = a."userId"
-ORDER BY a.gold DESC 
-LIMIT 3000;
-
+order by a.gold desc 
+limit 1000
