@@ -15,4 +15,11 @@ WHERE
     EXISTS (SELECT 1 FROM stars_transactions    st  WHERE st."userId" = ur."userId")
     OR EXISTS (SELECT 1 FROM stripe_transactions stp WHERE stp."userId" = ur."userId")
     OR EXISTS (SELECT 1 FROM thirdweb_transactions tw WHERE tw."userId" = ur."userId")
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM users_challenges uc
+    WHERE uc."userId" = ur."userId"
+      -- достаём число из 'constellationNN' и проверяем, что NN >= 10
+      AND substring(lower(uc.constellationType) from 'constellation([0-9]+)$')::int >= 10
   );
