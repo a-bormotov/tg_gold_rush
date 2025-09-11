@@ -70,7 +70,7 @@ tbody tr:nth-child(3) { background:#473431; color:#fff; font-weight:bold; }
 <div class="prize-pool">Prize Pool: 500 000 PIXELS (≈ 17 000 USD)</div>
 <div class="event-details">
   <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-  September 11, X UTC - September 16, X UTC
+  September 11, 4pm UTC - September 16, 4pm UTC
   <svg viewBox="0 0 24 24"><path d="M6 3h12v2a6 6 0 0 1-6 6 6 6 0 0 1-6-6V3z"/><rect x="9" y="11" width="6" height="10"/></svg>
   Top 1,000 Players
 </div>
@@ -186,10 +186,11 @@ function parseCSV(text){
   return rows;
 }
 function toNumber(x){ const n=Number(String(x??'').replace(/\s|,/g,'')); return isNaN(n)?0:n; }
-function fmtInt(n){ return n.toLocaleString('en-US'); }
+function fmtInt(n){ return Number(n||0).toLocaleString('en-US'); }
+function fmtUSD(n){ return '$' + Number(n||0).toLocaleString('en-US', { maximumFractionDigits: 2 }); }
 function timeAgo(fromMs){
   const now = Date.now();
-  const diff = Math.max(0, now - fromMs); // ms
+  const diff = Math.max(0, now - fromMs);
   const s = Math.floor(diff/1000);
   if (s < 60) return `${s} sec ago`;
   const m = Math.floor(s/60);
@@ -203,6 +204,43 @@ function timeAgo(fromMs){
   const y = Math.floor(mo/12);
   return `${y} y ago`;
 }
+function escapeHTML(s){
+  return String(s)
+    .replaceAll('&','&amp;')
+    .replaceAll('<','&lt;')
+    .replaceAll('>','&gt;')
+    .replaceAll('"','&quot;')
+    .replaceAll("'",'&#39;');
+}
+
+// --- Loaders ---
+async function loadCSV(path){
+  const res = await fetch(path, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${path}`);
+  return { text: await res.text(), headers: res.headers };
+}
+async function loadPixelMap(){
+  try{
+    const { text } = await loadCSV('./pixel.csv');
+    const rows = parseCSV(text);
+    if (!rows.length) return {};
+    const headers = rows[0].map(h=>String(h).trim().toLowerCase());
+    const idx = Object.fromEntries(headers.map((h,i)=>[h, i]));
+    const need = ['rank','pixel','usd'].every(k=>k in idx);
+    if (!need) return {};
+    const map = {};
+    for (let i=1;i<rows.length;i++){
+      const r = rows[i];
+      const rank = toNumber(r[idx['rank']]);
+      const px = toNumber(r[idx['pixel']]);
+      const usd = toNumber(r[idx['usd']]);
+      if (rank>0) map[rank] = { pixel: px, usd: usd };
+    }
+    return map;
+  }catch(_){
+    return {};
+  }
+}
 
 // --- Load CSV and render ---
 (async function(){
@@ -213,7 +251,7 @@ function timeAgo(fromMs){
   let lastModifiedMs = null;
 
   try{
-    // 1) HEAD, чтобы получить Last-Modified (если сервер отдаёт)
+    // Last-Modified via HEAD (если доступно)
     const head = await fetch('./user_total.csv', { method: 'HEAD', cache: 'no-store' }).catch(()=>null);
     if (head && head.ok){
       const lm = head.headers.get('last-modified');
@@ -223,25 +261,27 @@ function timeAgo(fromMs){
       }
     }
 
-    // 2) GET сам CSV
-    const res = await fetch('./user_total.csv', { cache: 'no-store' });
-    if (!res.ok) throw new Error('HTTP '+res.status);
+    // Загружаем данные
+    const [{ text: csvText, headers }, rewards] = await Promise.all([
+      loadCSV('./user_total.csv'),
+      loadPixelMap()
+    ]);
 
-    // если HEAD не дал метку — пробуем взять из GET
+    // если HEAD не дал метку — попробуем из GET
     if (!lastModifiedMs){
-      const lm2 = res.headers.get('last-modified');
+      const lm2 = headers.get('last-modified');
       if (lm2){
         const d2 = new Date(lm2);
         if (!isNaN(d2)) lastModifiedMs = d2.getTime();
       }
     }
 
-    const text = await res.text();
-    const rows = parseCSV(text);
+    // Парсим user_total.csv
+    const rows = parseCSV(csvText);
     if (!rows.length) throw new Error('CSV is empty');
 
-    const headers = rows[0].map(h => String(h).trim());
-    const idx = Object.fromEntries(headers.map((h,i)=>[h.toLowerCase(), i]));
+    const headersRow = rows[0].map(h => String(h).trim());
+    const idx = Object.fromEntries(headersRow.map((h,i)=>[h.toLowerCase(), i]));
     const has = (name) => idx.hasOwnProperty(name);
     const gi = (row, name) => row[idx[name]];
 
@@ -258,11 +298,14 @@ function timeAgo(fromMs){
       };
     });
 
+    // Сортировка и ранги
     data.sort((a,b)=> b.score - a.score || b.gold - a.gold || String(a.username).localeCompare(String(b.username)));
     data.forEach((row, i)=> row.rank = i+1);
 
+    // Рендер
     const frag = document.createDocumentFragment();
     for (const row of data){
+      const prize = rewards[row.rank] || { pixel: 0, usd: 0 };
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td>${row.rank}</td>
@@ -272,8 +315,8 @@ function timeAgo(fromMs){
         <td>${fmtInt(row.rares)}</td>
         <td>${fmtInt(row.epics)}</td>
         <td>${fmtInt(row.legendaries)}</td>
-        <td>0</td>
-        <td>$0</td>
+        <td>${fmtInt(prize.pixel)}</td>
+        <td>${fmtUSD(prize.usd)}</td>
       `;
       frag.appendChild(tr);
     }
@@ -282,20 +325,15 @@ function timeAgo(fromMs){
 
     qualifyingEl.textContent = fmtInt(data.length);
 
-    // 3) Обновляем Last Updated (абсолютная дата + относительное «сколько прошло»)
-    // если сервер не дал заголовок — используем текущее время как деградацию
-	const ts = lastModifiedMs ?? Date.now();
-	const rel = timeAgo(ts);
-	const icon = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="6" x2="12" y2="12"/><line x1="12" y1="12" x2="16" y2="14"/></svg>';
-	lastEl.innerHTML = `${icon} Last Updated: ${rel}`;
-	
-
-    // 4) Каждую минуту обновляем «rel»
-	setInterval(()=>{
-	const relNow = timeAgo(ts);
-	lastEl.innerHTML = `${icon} Last Updated: ${relNow}`;
-	}, 60_000);
-	
+    // Last Updated — только «сколько прошло»
+    const ts = lastModifiedMs ?? Date.now();
+    const rel = timeAgo(ts);
+    const icon = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="6" x2="12" y2="12"/><line x1="12" y1="12" x2="16" y2="14"/></svg>';
+    lastEl.innerHTML = `${icon} Last Updated: ${rel}`;
+    setInterval(()=>{
+      const relNow = timeAgo(ts);
+      lastEl.innerHTML = `${icon} Last Updated: ${relNow}`;
+    }, 60_000);
 
   } catch(e){
     console.error(e);
@@ -316,15 +354,6 @@ function timeAgo(fromMs){
       }
     }
   });
-
-  function escapeHTML(s){
-    return String(s)
-      .replaceAll('&','&amp;')
-      .replaceAll('<','&lt;')
-      .replaceAll('>','&gt;')
-      .replaceAll('"','&quot;')
-      .replaceAll("'",'&#39;');
-  }
 })();
 </script>
 </div>
