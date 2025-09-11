@@ -83,9 +83,9 @@ tbody tr:nth-child(3) { background:#473431; color:#fff; font-weight:bold; }
   <div class="section-title">Scoring System</div>
   <div class="item">Collect Gold Coins to climb the leaderboard</div>
   <div class="item">Boost your rewards with Hero Card multipliers from the Gacha in Sleepagotchi LITE</div>
-  <div class="item rare">Rare Card - X %</div>
-  <div class="item epic">Epic Card - X %</div>
-  <div class="item legendary">Legendary Card - X %</div>
+  <div class="item rare">Rare Card - 0.1 %</div>
+  <div class="item epic">Epic Card - 0.6 %</div>
+  <div class="item legendary">Legendary Card - 3 %</div>
 </div>
 
 <!-- Previous event -->
@@ -187,9 +187,6 @@ function parseCSV(text){
 }
 function toNumber(x){ const n=Number(String(x??'').replace(/\s|,/g,'')); return isNaN(n)?0:n; }
 function fmtInt(n){ return n.toLocaleString('en-US'); }
-function formatDate(d){
-  return d.toLocaleDateString('en-US'); // e.g. 09/11/2025
-}
 function timeAgo(fromMs){
   const now = Date.now();
   const diff = Math.max(0, now - fromMs); // ms
@@ -287,17 +284,18 @@ function timeAgo(fromMs){
 
     // 3) Обновляем Last Updated (абсолютная дата + относительное «сколько прошло»)
     // если сервер не дал заголовок — используем текущее время как деградацию
-    const ts = lastModifiedMs ?? Date.now();
-    const abs = formatDate(new Date(ts));
-    const rel = timeAgo(ts);
-    const icon = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="6" x2="12" y2="12"/><line x1="12" y1="12" x2="16" y2="14"/></svg>';
-    lastEl.innerHTML = `${icon} Last Updated: ${abs} • ${rel}`;
+	const ts = lastModifiedMs ?? Date.now();
+	const rel = timeAgo(ts);
+	const icon = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="6" x2="12" y2="12"/><line x1="12" y1="12" x2="16" y2="14"/></svg>';
+	lastEl.innerHTML = `${icon} Last Updated: ${rel}`;
+	
 
     // 4) Каждую минуту обновляем «rel»
-    setInterval(()=>{
-      const relNow = timeAgo(ts);
-      lastEl.innerHTML = `${icon} Last Updated: ${abs} • ${relNow}`;
-    }, 60_000);
+	setInterval(()=>{
+	const relNow = timeAgo(ts);
+	lastEl.innerHTML = `${icon} Last Updated: ${relNow}`;
+	}, 60_000);
+	
 
   } catch(e){
     console.error(e);
