@@ -5,7 +5,9 @@ WITH flattened AS (
   FROM events e
   CROSS JOIN LATERAL jsonb_array_elements(e.payload::jsonb->'output') AS item
   WHERE
-    e."name" = 'SpendGachaAction'
+    e."createdAt" >= TIMESTAMP '2025-09-09 16:00:00'
+    AND e."createdAt" <  TIMESTAMP '2025-09-10 16:00:00'
+    AND e."name" = 'SpendGachaAction'
     AND (item->>'rarity') ~ '^[0-9]+$'
 )
 SELECT

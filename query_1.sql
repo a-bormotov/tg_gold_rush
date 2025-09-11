@@ -8,6 +8,11 @@ SELECT
   ur."userId"
 FROM users_resources_total ur
 LEFT JOIN users u ON u.id = ur."userId"
-WHERE ur."resourceType" = 'gold'
-ORDER BY ur.amount DESC 
-LIMIT 1000
+WHERE
+  ur."resourceType" = 'gold'
+  AND ur."userId" = ANY(%s)   -- список userId из query_2.sql
+  AND (
+    EXISTS (SELECT 1 FROM stars_transactions    st  WHERE st."userId" = ur."userId")
+    OR EXISTS (SELECT 1 FROM stripe_transactions stp WHERE stp."userId" = ur."userId")
+    OR EXISTS (SELECT 1 FROM thirdweb_transactions tw WHERE tw."userId" = ur."userId")
+  );
