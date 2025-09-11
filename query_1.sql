@@ -20,6 +20,6 @@ WHERE
     SELECT 1
     FROM users_challenges uc
     WHERE uc."userId" = ur."userId"
-      -- достаём число из 'constellationNN' и проверяем, что NN >= 10
-      AND substring(lower(uc.constellationType) from 'constellation([0-9]+)$')::int >= 10
+      -- берём число из строки вида 'constellation17' и проверяем >= 10
+      AND substring(lower(uc."constellationType") from 'constellation([0-9]+)$')::int >= 10
   );
