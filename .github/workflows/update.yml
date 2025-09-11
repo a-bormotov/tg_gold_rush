@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# не даём задачам пересекаться (во избежание конфликтов туннелей/портов)
+concurrency:
+  group: update-csv
+  cancel-in-progress: true
+
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -34,8 +39,8 @@ jobs:
             pip install psycopg2-binary pandas
           fi
 
-      # --- SSH-туннель (если USE_SSH == 'true') ---
-      - name: Start SSH tunnel (if USE_SSH == true)
+      # --- SSH-туннели (если USE_SSH == 'true') ---
+      - name: Start SSH tunnels (if USE_SSH == true)
         if: ${{ env.USE_SSH == 'true' }}
         env:
           SSH_KEY:  ${{ secrets.SSH1_PRIVATE_KEY }}
@@ -53,22 +58,20 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -p "${SSH_PORT}" "${SSH_HOST}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-          echo "→ Forward 6543 -> ${DB1_HOST}:${DB1_PORT} (DB1)"
-          ssh -o StrictHostKeyChecking=yes -i ~/.ssh/id_rsa -N -f \
-            -L 6543:${DB1_HOST}:${DB1_PORT} \
-            ${SSH_USER}@${SSH_HOST} -p ${SSH_PORT}
+          # Живые туннели + жёсткий фейл, если проброс не удался
+          SSH_OPTS="-o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -i ~/.ssh/id_rsa -p ${SSH_PORT}"
 
-          echo "→ Forward 6544 -> ${DB2_HOST}:${DB2_PORT} (DB2)"
-          ssh -o StrictHostKeyChecking=yes -i ~/.ssh/id_rsa -N -f \
-            -L 6544:${DB2_HOST}:${DB2_PORT} \
-            ${SSH_USER}@${SSH_HOST} -p ${SSH_PORT}
+          echo "→ Forward DB1 6543 -> ${DB1_HOST}:${DB1_PORT}"
+          nohup ssh ${SSH_OPTS} -N -L 6543:${DB1_HOST}:${DB1_PORT} ${SSH_USER}@${SSH_HOST} > ssh_db1.log 2>&1 & echo $! > tunnel_db1.pid
 
-          for i in {1..30}; do
-            (echo > /dev/tcp/127.0.0.1/6543) >/dev/null 2>&1 && (echo > /dev/tcp/127.0.0.1/6544) >/dev/null 2>&1 && { echo "✓ Tunnels are up"; exit 0; }
+          echo "→ Forward DB2 6544 -> ${DB2_HOST}:${DB2_PORT}"
+          nohup ssh ${SSH_OPTS} -N -L 6544:${DB2_HOST}:${DB2_PORT} ${SSH_USER}@${SSH_HOST} > ssh_db2.log 2>&1 & echo $! > tunnel_db2.pid
+
+          # ждём, пока порты реально поднимутся
+          for i in {1..40}; do
+            (echo > /dev/tcp/127.0.0.1/6543) >/dev/null 2>&1 && (echo > /dev/tcp/127.0.0.1/6544) >/dev/null 2>&1 && { echo "✓ Tunnels are up"; break; }
             sleep 0.5
           done
-          echo "✗ Tunnel(s) failed to start" >&2
-          exit 1
 
       - name: Run run_query.py
         env:
@@ -104,3 +107,22 @@ jobs:
           git add user_gold.csv user_total.csv || true
           git diff --cached --quiet || git commit -m "update csv files ($(date -u +'%Y-%m-%d %H:%M:%S') UTC)"
           git push
+
+      # Показать логи SSH (на случай отладки), даже если шаги прошли
+      - name: Debug SSH logs
+        if: ${{ always() && env.USE_SSH == 'true' }}
+        run: |
+          for f in ssh_db1.log ssh_db2.log; do
+            if [ -f "$f" ]; then
+              echo "==== $f ===="
+              tail -n +1 "$f" || true
+            fi
+          done
+
+      # Аккуратно закрыть туннели
+      - name: Stop tunnels
+        if: ${{ env.USE_SSH == 'true' }}
+        run: |
+          set +e
+          [ -f tunnel_db1.pid ] && kill $(cat tunnel_db1.pid) 2>/dev/null || true
+          [ -f tunnel_db2.pid ] && kill $(cat tunnel_db2.pid) 2>/dev/null || true

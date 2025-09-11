@@ -1,9 +1,11 @@
 import os
 import sys
+import time
 from pathlib import Path
 
 import psycopg2
 import pandas as pd
+from psycopg2 import OperationalError, InterfaceError
 
 
 # Подключения: выставляются в workflow / окружении
@@ -18,12 +20,32 @@ OUT_TOTAL = Path("user_total.csv")  # ПОСЛЕ вычитания + score + ra
 SNAPSHOT_FILE = Path("user_snapshot.csv")  # формат: userId,gold (сколько вычесть)
 
 
-def fetch_df(conn_url: str, sql: str, params=None) -> pd.DataFrame:
-    """Выполнить SQL и вернуть DataFrame."""
+def fetch_df(conn_url: str, sql: str, params=None, retries: int = 3, delay: int = 3) -> pd.DataFrame:
+    """Выполнить SQL и вернуть DataFrame с ретраями и TCP keepalive."""
     if not conn_url:
         raise RuntimeError("Не задан URL подключения к БД.")
-    with psycopg2.connect(conn_url) as conn:
-        return pd.read_sql(sql, conn, params=params)
+
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            conn = psycopg2.connect(
+                conn_url,
+                # держим TCP живым, чтобы туннель не "засыпал"
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5,
+            )
+            try:
+                return pd.read_sql(sql, conn, params=params)
+            finally:
+                conn.close()
+        except (OperationalError, InterfaceError) as e:
+            last_err = e
+            print(f"[fetch_df] attempt {attempt}/{retries} failed: {e}", file=sys.stderr)
+            time.sleep(delay)
+    # если все попытки провалились — пробрасываем последнюю ошибку
+    raise last_err
 
 
 def norm_lower(df: pd.DataFrame) -> pd.DataFrame:
