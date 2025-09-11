@@ -6,7 +6,8 @@
 <title>PIXEL event gold</title>
 <style>
   :root { --bg:#0b1220; --fg:#e6f1ff; --muted:#9fb1c6; --card:#111a2b; --border:#223045; }
-  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial}
   header{padding:24px 20px;border-bottom:1px solid var(--border)}
   h1{margin:0;font-size:20px;letter-spacing:.2px}
   main{max-width:1100px;margin:0 auto;padding:20px}
@@ -32,9 +33,9 @@
     <section class="card">
       <div class="controls">
         <h2 style="margin:0;font-size:16px">Таблица</h2>
-        <a href="./user_gold.csv" download>Скачать CSV</a>
+        <a id="download-link" href="./user_total.csv" download>Скачать CSV</a>
       </div>
-      <p class="hint">Данные загружаются из <code>user_gold.csv</code>. Клик по заголовку — сортировка.</p>
+      <p class="hint">Данные загружаются из <code>user_total.csv</code>. Клик по заголовку — сортировка.</p>
       <div class="table-wrap">
         <table id="data-table" aria-label="Таблица PIXEL event gold">
           <thead><tr><!-- headers injected --></tr></thead>
@@ -48,9 +49,17 @@
 <script>
 (async function(){
   const status = document.getElementById('status');
+  const dl = document.getElementById('download-link');
+
+  // Путь к файлу: пробуем относительный и корневой (если index.html в подпапке)
+  const candidates = ['./user_total.csv', '/user_total.csv'];
+
   try {
-    const res = await fetch('./user_gold.csv', {cache:'no-store'});
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const res = await tryFetchAny(candidates, {cache:'no-store'});
+    if (!res) throw new Error('Файл не найден ни по одному пути');
+    // обновим href на реально сработавший путь
+    dl.href = res.url;
+
     const text = await res.text();
     const rows = parseCSV(text);
     if (!rows.length) {
@@ -60,28 +69,63 @@
     renderTable('data-table', rows);
     status.textContent = 'Загружено строк: ' + (rows.length - 1);
   } catch (e) {
-    status.innerHTML = 'Не удалось загрузить <code>user_gold.csv</code>. ' +
+    status.innerHTML = 'Не удалось загрузить <code>user_total.csv</code>. ' +
       '<span class="error">' + (e.message || e) + '</span>';
   }
 
-  // Простой CSV-парсер (подходит, если поля без запятых внутри кавычек)
+  async function tryFetchAny(paths, opts){
+    for (const p of paths){
+      try {
+        const r = await fetch(p, opts);
+        if (r.ok) return r;
+      } catch(_) {}
+    }
+    return null;
+  }
+
+  // CSV/TSV парсер с автоопределением разделителя (",", ";", "\t")
   function parseCSV(text) {
-    const lines = text.replace(/\r/g,'').trim().split('\n');
+    const content = text.replace(/\r/g,'').trim();
+    if (!content) return [];
+    const lines = content.split('\n');
+
+    const delim = detectDelimiter(lines[0]);
+
     return lines.map(line => {
-      // поддержка "простых" кавычек
       const out = [];
       let cur = '', q = false;
       for (let i=0; i<line.length; i++){
         const ch = line[i], nx = line[i+1];
-        if (ch === '"' ){ 
+        if (ch === '"'){
           if (q && nx === '"'){ cur+='"'; i++; }
           else { q = !q; }
-        } else if (ch === ',' && !q){ out.push(cur); cur=''; }
+        } else if (ch === delim && !q){ out.push(cur); cur=''; }
         else { cur += ch; }
       }
       out.push(cur);
       return out;
     });
+  }
+
+  function detectDelimiter(firstLine){
+    // считаем разделители вне кавычек
+    const candidates = [',','\t',';'];
+    const counts = Object.fromEntries(candidates.map(c => [c,0]));
+    let q=false;
+    for (let i=0;i<firstLine.length;i++){
+      const ch = firstLine[i], nx = firstLine[i+1];
+      if (ch === '"'){
+        if (q && nx === '"'){ i++; } else { q=!q; }
+      } else if (!q && candidates.includes(ch)){
+        counts[ch]++;
+      }
+    }
+    // берём самый частый; по умолчанию — запятая
+    let best = ',', max = -1;
+    for (const c of candidates){
+      if (counts[c] > max){ max = counts[c]; best = c; }
+    }
+    return best;
   }
 
   function renderTable(id, rows) {
