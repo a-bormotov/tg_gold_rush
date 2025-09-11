@@ -1,6 +1,6 @@
 WITH agg AS (
   SELECT ur."userId", SUM(ur.amount) AS gold
-  FROM users_resources ur
+  FROM users_resources_total ur
   WHERE ur."resourceType" = 'gold'
   GROUP BY ur."userId"
 )
