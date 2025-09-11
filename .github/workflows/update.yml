@@ -11,6 +11,8 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
+    env:
+      USE_SSH: ${{ secrets.USE_SSH }}   # теперь USE_SSH доступен как env
 
     steps:
       - name: Checkout repo
@@ -32,15 +34,15 @@ jobs:
             pip install psycopg2-binary pandas
           fi
 
-      # SSH-туннель включается, если USE_SSH == 'true'
+      # --- SSH-туннель (включится, если USE_SSH == 'true') ---
       - name: Start SSH tunnel (if USE_SSH == true)
-        if: ${{ secrets.USE_SSH == 'true' }}
+        if: ${{ env.USE_SSH == 'true' }}
         env:
           SSH_KEY:  ${{ secrets.SSH1_PRIVATE_KEY }}
           SSH_HOST: ${{ secrets.SSH1_HOST }}
           SSH_PORT: ${{ secrets.SSH1_PORT }}
           SSH_USER: ${{ secrets.SSH1_USER }}
-          DB_HOST:  ${{ secrets.DB1_HOST }}   # как БД видна с бастиона (часто 127.0.0.1)
+          DB_HOST:  ${{ secrets.DB1_HOST }}   # адрес БД с точки зрения bastion
           DB_PORT:  ${{ secrets.DB1_PORT }}   # обычно 5432
         run: |
           set -euo pipefail
@@ -68,7 +70,7 @@ jobs:
           DB_NAME:     ${{ secrets.DB1_NAME }}
           DB_HOST:     ${{ secrets.DB1_HOST }}
           DB_PORT:     ${{ secrets.DB1_PORT }}
-          USE_SSH:     ${{ secrets.USE_SSH }}
+          USE_SSH:     ${{ env.USE_SSH }}
         run: |
           set -euo pipefail
           if [ "${USE_SSH}" = "true" ]; then
@@ -79,3 +81,11 @@ jobs:
             echo "→ Using direct DB URL"
           fi
           python run_query.py   # сохранит user_gold.csv в корень
+
+      - name: Commit & push if changed
+        run: |
+          git config user.name  "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add user_gold.csv || true
+          git diff --cached --quiet || git commit -m "update user_gold.csv"
+          git push
