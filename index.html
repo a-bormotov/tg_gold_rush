@@ -226,8 +226,7 @@ async function loadPixelMap(){
     if (!rows.length) return {};
     const headers = rows[0].map(h=>String(h).trim().toLowerCase());
     const idx = Object.fromEntries(headers.map((h,i)=>[h, i]));
-    const need = ['rank','pixel','usd'].every(k=>k in idx);
-    if (!need) return {};
+    if (!('rank' in idx && 'pixel' in idx && 'usd' in idx)) return {};
     const map = {};
     for (let i=1;i<rows.length;i++){
       const r = rows[i];
@@ -251,7 +250,7 @@ async function loadPixelMap(){
   let lastModifiedMs = null;
 
   try{
-    // Last-Modified via HEAD (если доступно)
+    // Получаем Last-Modified
     const head = await fetch('./user_total.csv', { method: 'HEAD', cache: 'no-store' }).catch(()=>null);
     if (head && head.ok){
       const lm = head.headers.get('last-modified');
@@ -261,13 +260,12 @@ async function loadPixelMap(){
       }
     }
 
-    // Загружаем данные
+    // Загружаем оба файла
     const [{ text: csvText, headers }, rewards] = await Promise.all([
       loadCSV('./user_total.csv'),
       loadPixelMap()
     ]);
 
-    // если HEAD не дал метку — попробуем из GET
     if (!lastModifiedMs){
       const lm2 = headers.get('last-modified');
       if (lm2){
@@ -298,14 +296,20 @@ async function loadPixelMap(){
       };
     });
 
-    // Сортировка и ранги
+    // Сортировка
     data.sort((a,b)=> b.score - a.score || b.gold - a.gold || String(a.username).localeCompare(String(b.username)));
+
+    // Ограничиваем до ТОП-3000 и перенумеровываем
+    data = data.slice(0, 3000);
     data.forEach((row, i)=> row.rank = i+1);
 
     // Рендер
     const frag = document.createDocumentFragment();
     for (const row of data){
-      const prize = rewards[row.rank] || { pixel: 0, usd: 0 };
+      const prize = (row.rank <= 1000 && rewards[row.rank])
+        ? rewards[row.rank]
+        : { pixel: 0, usd: 0 };
+
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td>${row.rank}</td>
@@ -325,7 +329,7 @@ async function loadPixelMap(){
 
     qualifyingEl.textContent = fmtInt(data.length);
 
-    // Last Updated — только «сколько прошло»
+    // Last Updated
     const ts = lastModifiedMs ?? Date.now();
     const rel = timeAgo(ts);
     const icon = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="6" x2="12" y2="12"/><line x1="12" y1="12" x2="16" y2="14"/></svg>';
