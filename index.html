@@ -14,9 +14,13 @@
   .hint{color:var(--muted);font-size:13px;margin:10px 0 0}
   .table-wrap{overflow:auto;margin-top:8px}
   table{border-collapse:collapse;width:100%;min-width:520px}
-  thead th{position:sticky;top:0;background:#0f192b;text-align:left;font-weight:600;border-bottom:1px solid var(--border);padding:10px}
+  thead th{position:sticky;top:0;background:#0f192b;text-align:left;font-weight:600;border-bottom:1px solid var(--border);padding:10px;cursor:pointer}
   tbody td{border-bottom:1px solid rgba(255,255,255,.07);padding:10px;font-size:14px}
   tbody tr:hover{background:rgba(255,255,255,.04)}
+  .controls{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:8px}
+  .controls a{color:var(--fg);font-size:13px;text-decoration:none;border:1px solid var(--border);padding:6px 10px;border-radius:10px}
+  .controls a:hover{border-color:#20e39c}
+  .error{color:#ffb4b4}
 </style>
 </head>
 <body>
@@ -26,37 +30,116 @@
 
   <main>
     <section class="card">
-      <h2 style="margin:0 0 8px 0;font-size:16px">Таблица (заглушка)</h2>
-      <p class="hint">Данные будут подгружаться автоматически позже.</p>
+      <div class="controls">
+        <h2 style="margin:0;font-size:16px">Таблица</h2>
+        <a href="./user_gold.csv" download>Скачать CSV</a>
+      </div>
+      <p class="hint">Данные загружаются из <code>user_gold.csv</code>. Клик по заголовку — сортировка.</p>
       <div class="table-wrap">
-        <table aria-label="Шаблон таблицы PIXEL event gold">
-          <thead>
-            <tr>
-              <th>User ID</th>
-              <th>Gold</th>
-              <th>Updated At (UTC)</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>—</td>
-              <td>—</td>
-              <td>—</td>
-            </tr>
-            <tr>
-              <td>—</td>
-              <td>—</td>
-              <td>—</td>
-            </tr>
-            <tr>
-              <td>—</td>
-              <td>—</td>
-              <td>—</td>
-            </tr>
-          </tbody>
+        <table id="data-table" aria-label="Таблица PIXEL event gold">
+          <thead><tr><!-- headers injected --></tr></thead>
+          <tbody><!-- rows injected --></tbody>
         </table>
       </div>
+      <p id="status" class="hint"></p>
     </section>
   </main>
+
+<script>
+(async function(){
+  const status = document.getElementById('status');
+  try {
+    const res = await fetch('./user_gold.csv', {cache:'no-store'});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const text = await res.text();
+    const rows = parseCSV(text);
+    if (!rows.length) {
+      status.textContent = 'CSV пустой.';
+      return;
+    }
+    renderTable('data-table', rows);
+    status.textContent = 'Загружено строк: ' + (rows.length - 1);
+  } catch (e) {
+    status.innerHTML = 'Не удалось загрузить <code>user_gold.csv</code>. ' +
+      '<span class="error">' + (e.message || e) + '</span>';
+  }
+
+  // Простой CSV-парсер (подходит, если поля без запятых внутри кавычек)
+  function parseCSV(text) {
+    const lines = text.replace(/\r/g,'').trim().split('\n');
+    return lines.map(line => {
+      // поддержка "простых" кавычек
+      const out = [];
+      let cur = '', q = false;
+      for (let i=0; i<line.length; i++){
+        const ch = line[i], nx = line[i+1];
+        if (ch === '"' ){ 
+          if (q && nx === '"'){ cur+='"'; i++; }
+          else { q = !q; }
+        } else if (ch === ',' && !q){ out.push(cur); cur=''; }
+        else { cur += ch; }
+      }
+      out.push(cur);
+      return out;
+    });
+  }
+
+  function renderTable(id, rows) {
+    const table = document.getElementById(id);
+    const thead = table.tHead.rows[0];
+    const tbody = table.tBodies[0];
+
+    const headers = rows[0];
+    thead.innerHTML = headers.map(h => `<th>${escapeHTML(h)}</th>`).join('');
+
+    const frag = document.createDocumentFragment();
+    for (let r = 1; r < rows.length; r++) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = rows[r].map(v => `<td>${escapeHTML(v)}</td>`).join('');
+      frag.appendChild(tr);
+    }
+    tbody.innerHTML = '';
+    tbody.appendChild(frag);
+
+    // сортировка по клику
+    let sortIdx = -1, asc = true;
+    [...thead.cells].forEach((th, i) => {
+      th.addEventListener('click', () => {
+        asc = (sortIdx === i) ? !asc : true;
+        sortIdx = i;
+        sortTable(tbody, i, asc);
+      });
+    });
+  }
+
+  function val(v){
+    const n = Number(v.replace?.(/\s/g,'') ?? v);
+    if (!isNaN(n)) return n;
+    const d = new Date(v);
+    if (!isNaN(d)) return d.getTime();
+    return (v ?? '').toString().toLowerCase();
+  }
+
+  function sortTable(tbody, i, asc){
+    const rows = Array.from(tbody.rows);
+    rows.sort((a,b) => {
+      const av = val(a.cells[i].innerText.trim());
+      const bv = val(b.cells[i].innerText.trim());
+      return asc ? (av>bv?1:av<bv?-1:0) : (av<bv?1:av>bv?-1:0);
+    });
+    tbody.innerHTML = '';
+    rows.forEach(r => tbody.appendChild(r));
+  }
+
+  function escapeHTML(s){
+    return String(s)
+      .replaceAll('&','&amp;')
+      .replaceAll('<','&lt;')
+      .replaceAll('>','&gt;')
+      .replaceAll('"','&quot;')
+      .replaceAll("'",'&#39;');
+  }
+})();
+</script>
 </body>
 </html>

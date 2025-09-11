@@ -1,0 +1,50 @@
+name: Run query_1 hourly
+
+on:
+  workflow_dispatch: {}          # запуск вручную из вкладки Actions
+  schedule:
+    - cron: "0 * * * *"         # каждый час, в начале часа (UTC)
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run query and write CSV
+        env:
+          DB_URL: ${{ secrets.DB_URL }}
+        run: |
+          python run_query.py
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "ci@users.noreply.github.com"
+
+      - name: Commit CSV if changed
+        run: |
+          if [ -n "$(git status --porcelain user_gold.csv)" ]; then
+            git add user_gold.csv
+            git commit -m "data: update user_gold.csv ($(date -u +'%Y-%m-%d %H:%M:%S') UTC)"
+            git push origin HEAD:${GITHUB_REF_NAME}
+          else
+            echo "No changes to commit."
+          fi
