@@ -13,8 +13,9 @@ DB2_URL = os.getenv("DB2_URL")  # БД событий (query_2.sql)
 SQL1_FILE = Path("query_1.sql")
 SQL2_FILE = Path("query_2.sql")
 
-OUT_GOLD  = Path("user_gold.csv")
-OUT_TOTAL = Path("user_total.csv")
+OUT_GOLD  = Path("user_gold.csv")   # ДО вычитания
+OUT_TOTAL = Path("user_total.csv")  # ПОСЛЕ вычитания
+SNAPSHOT_FILE = Path("user_snapshot.csv")  # формат: userId,gold (сколько вычесть)
 
 
 def fetch_df(conn_url: str, sql: str, params=None) -> pd.DataFrame:
@@ -30,10 +31,10 @@ def norm_lower(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns={c: c.lower().strip() for c in df.columns})
 
 
-def ensure_userid(df: pd.DataFrame, prefer: str = "userid") -> pd.DataFrame:
+def ensure_userid(df: pd.DataFrame) -> pd.DataFrame:
     """
     Гарантировать наличие колонки 'userid' (lowercase).
-    Переименуем возможные варианты: "userId", "User ID", 'user id', и т.п.
+    Переименуем возможные варианты: "userId", "User ID", 'user id', 'user_id'.
     """
     if "userid" in df.columns:
         return df
@@ -41,10 +42,53 @@ def ensure_userid(df: pd.DataFrame, prefer: str = "userid") -> pd.DataFrame:
         base = c.strip('"').lower()
         if base in ("userid", "user id", "user_id"):
             return df.rename(columns={c: "userid"})
-    # Если не нашли — бросаем осмысленную ошибку
     raise RuntimeError(
         f"Не найдена колонка userId в результате запроса. Имеющиеся колонки: {df.columns.tolist()}"
     )
+
+
+def load_snapshot(filepath: Path) -> pd.DataFrame:
+    """
+    Загрузить снимок списаний из CSV (userId,gold).
+    Возвращает DataFrame с колонками: userid, subtract_gold (float).
+    Если файла нет — вернёт пустой DF.
+    """
+    if not filepath.exists():
+        print(f"[snapshot] Файл {filepath} не найден — вычитание не будет применено.")
+        return pd.DataFrame(columns=["userid", "subtract_gold"])
+
+    # читаем только нужные колонки; userId оставляем строкой, gold как число
+    try:
+        df = pd.read_csv(
+            filepath,
+            dtype={ "userId": "string" },
+            usecols=["userId", "gold"]
+        )
+    except ValueError:
+        # если заголовки отличаются регистром/пробелами — прочитаем всё и нормализуем
+        df = pd.read_csv(filepath, dtype="string")
+        df = norm_lower(df)
+        # пытаемся найти userId/gold
+        uid_col = None
+        gold_col = None
+        for c in df.columns:
+            b = c.strip('"').lower()
+            if b in ("userid", "user id", "user_id"):
+                uid_col = c
+            if b in ("gold",):
+                gold_col = c
+        if uid_col is None or gold_col is None:
+            print(f"[snapshot] Не удалось распознать колонки userId/gold в {filepath}. Снимок не будет применён.")
+            return pd.DataFrame(columns=["userid", "subtract_gold"])
+        df = df[[uid_col, gold_col]].rename(columns={uid_col: "userId", gold_col: "gold"})
+
+    # нормализуем и переименуем
+    df = norm_lower(df)
+    df = ensure_userid(df)
+    # gold → число (NaN → 0), назовём subtract_gold
+    df["subtract_gold"] = pd.to_numeric(df["gold"], errors="coerce").fillna(0)
+    df = df[["userid", "subtract_gold"]]
+    return df
 
 
 def main():
@@ -88,29 +132,21 @@ def main():
 
     sql1 = SQL1_FILE.read_text(encoding="utf-8").strip()
 
-    # ВАЖНО: query_1.sql должен уметь фильтроваться по ANY(%s) по колонке "userId"
-    # Пример внутри query_1.sql:
+    # ВАЖНО: внутри query_1.sql:
     #   ... WHERE ur."resourceType"='gold'
-    #       AND ur."userId" = ANY(%s)
-    #       AND (EXISTS(...) OR EXISTS(...) OR EXISTS(...))
+    #       AND ur."userId" = ANY(%s)     -- сюда подставим user_ids
+    #       AND (EXISTS(...stars...) OR EXISTS(...stripe...) OR EXISTS(...thirdweb...))
     try:
         df1 = fetch_df(DB1_URL, sql1, params=(user_ids,))
     except Exception as e:
-        # На случай, если внутри query_1.sql другой алиас для userId — fallback:
         print(
-            f"[query_1] Предупреждение: не удалось выполнить с параметрами ANY(%s): {e}\n"
+            f"[query_1] Не удалось выполнить с фильтром ANY(%s): {e}\n"
             f"Попробую вытянуть всё и отфильтровать в памяти (медленнее).",
             file=sys.stderr,
         )
-        df1_all = fetch_df(DB1_URL, sql1)  # без фильтра — не всегда возможно, зависит от SQL
+        df1_all = fetch_df(DB1_URL, sql1)  # если этот SQL обязателен с параметром — этот шаг может упасть
         df1_all = norm_lower(df1_all)
-        # Поищем колонку с userId и отфильтруем
-        try:
-            df1_all = ensure_userid(df1_all)
-        except Exception as e2:
-            raise RuntimeError(
-                f"Не удалось применить фильтр по userId ни в БД, ни в памяти: {e2}"
-            )
+        df1_all = ensure_userid(df1_all)
         df1 = df1_all[df1_all["userid"].isin(user_ids)].copy()
 
     if df1.empty:
@@ -124,7 +160,6 @@ def main():
 
     # Нормализуем и проверим нужные колонки
     df1 = norm_lower(df1)
-    # Приведём userId → userid, если нужно
     if "userid" not in df1.columns:
         for c in list(df1.columns):
             if c.strip('"').lower() in ("userid", "user id", "user_id"):
@@ -136,11 +171,24 @@ def main():
                 f"[query_1] Отсутствует колонка '{need}'. Есть: {df1.columns.tolist()}"
             )
 
-    # --- Сохранить user_gold.csv (чистый результат первого запроса) ---
+    # --- ШАГ 3: сохранить user_gold.csv (ДО вычитания) ---
     df1[["username", "gold", "userid"]].to_csv(OUT_GOLD, index=False, encoding="utf-8")
     print(f"Сохранено {len(df1)} строк в {OUT_GOLD}")
 
-    # --- ШАГ 3: объединить с редкостями и сохранить user_total.csv ---
+    # --- ШАГ 4: применить снимок (user_snapshot.csv) — вычесть gold по каждому пользователю ---
+    snap = load_snapshot(SNAPSHOT_FILE)  # userid, subtract_gold
+    if not snap.empty:
+        # приводим gold к числу (если вдруг не числовой формат)
+        df1["gold"] = pd.to_numeric(df1["gold"], errors="coerce").fillna(0)
+        # мёрджим снимок и вычитаем
+        df1 = df1.merge(snap, on="userid", how="left")
+        df1["subtract_gold"] = pd.to_numeric(df1["subtract_gold"], errors="coerce").fillna(0)
+        df1["gold"] = df1["gold"] - df1["subtract_gold"]
+        df1 = df1.drop(columns=["subtract_gold"])
+    else:
+        print("[snapshot] Пустой/отсутствующий снимок — вычитание пропущено.")
+
+    # --- ШАГ 5: объединить с редкостями и сохранить user_total.csv (ПОСЛЕ вычитания) ---
     df2_small = df2[["userid", "rares", "epics", "legendaries"]].copy()
     total = df1.merge(df2_small, on="userid", how="left")
     total[["rares", "epics", "legendaries"]] = total[["rares", "epics", "legendaries"]].fillna(0).astype(int)
