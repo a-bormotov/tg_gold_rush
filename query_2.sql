@@ -6,7 +6,6 @@ WITH flattened AS (
   CROSS JOIN LATERAL jsonb_array_elements(e.payload::jsonb->'output') AS item
   WHERE
     e."name" = 'SpendGachaAction'
-    AND e."userId" = ANY(%s)
     AND (item->>'rarity') ~ '^[0-9]+$'
 )
 SELECT
