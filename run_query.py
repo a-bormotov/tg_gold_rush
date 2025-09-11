@@ -14,7 +14,7 @@ SQL1_FILE = Path("query_1.sql")
 SQL2_FILE = Path("query_2.sql")
 
 OUT_GOLD  = Path("user_gold.csv")   # ДО вычитания
-OUT_TOTAL = Path("user_total.csv")  # ПОСЛЕ вычитания
+OUT_TOTAL = Path("user_total.csv")  # ПОСЛЕ вычитания + score + rank
 SNAPSHOT_FILE = Path("user_snapshot.csv")  # формат: userId,gold (сколько вычесть)
 
 
@@ -57,38 +57,32 @@ def load_snapshot(filepath: Path) -> pd.DataFrame:
         print(f"[snapshot] Файл {filepath} не найден — вычитание не будет применено.")
         return pd.DataFrame(columns=["userid", "subtract_gold"])
 
-    # читаем только нужные колонки; userId оставляем строкой, gold как число
     try:
         df = pd.read_csv(
             filepath,
-            dtype={ "userId": "string" },
+            dtype={"userId": "string"},
             usecols=["userId", "gold"]
         )
     except ValueError:
-        # если заголовки отличаются регистром/пробелами — прочитаем всё и нормализуем
         df = pd.read_csv(filepath, dtype="string")
         df = norm_lower(df)
-        # пытаемся найти userId/gold
         uid_col = None
         gold_col = None
         for c in df.columns:
             b = c.strip('"').lower()
             if b in ("userid", "user id", "user_id"):
                 uid_col = c
-            if b in ("gold",):
+            if b == "gold":
                 gold_col = c
         if uid_col is None or gold_col is None:
             print(f"[snapshot] Не удалось распознать колонки userId/gold в {filepath}. Снимок не будет применён.")
             return pd.DataFrame(columns=["userid", "subtract_gold"])
         df = df[[uid_col, gold_col]].rename(columns={uid_col: "userId", gold_col: "gold"})
 
-    # нормализуем и переименуем
     df = norm_lower(df)
     df = ensure_userid(df)
-    # gold → число (NaN → 0), назовём subtract_gold
     df["subtract_gold"] = pd.to_numeric(df["gold"], errors="coerce").fillna(0)
-    df = df[["userid", "subtract_gold"]]
-    return df
+    return df[["userid", "subtract_gold"]]
 
 
 def main():
@@ -103,16 +97,14 @@ def main():
     if df2.empty:
         # Никто не открывал гачу: выгружаем пустые CSV с заголовками
         pd.DataFrame(columns=["username", "gold", "userid"]).to_csv(OUT_GOLD, index=False, encoding="utf-8")
-        pd.DataFrame(columns=["username", "gold", "rares", "epics", "legendaries", "userid"]).to_csv(
+        pd.DataFrame(columns=["rank", "username", "score", "gold", "rares", "epics", "legendaries", "userid"]).to_csv(
             OUT_TOTAL, index=False, encoding="utf-8"
         )
         print(f"[query_2] Пустой результат. Созданы пустые {OUT_GOLD} и {OUT_TOTAL}.")
         return
 
-    # Нормализуем колонки и гарантируем userid
     df2 = norm_lower(df2)
     df2 = ensure_userid(df2)
-    # Гарантируем наличие счётчиков редкостей
     for k in ("rares", "epics", "legendaries"):
         if k not in df2.columns:
             df2[k] = 0
@@ -120,7 +112,7 @@ def main():
     user_ids = pd.unique(df2["userid"]).tolist()
     if not user_ids:
         pd.DataFrame(columns=["username", "gold", "userid"]).to_csv(OUT_GOLD, index=False, encoding="utf-8")
-        pd.DataFrame(columns=["username", "gold", "rares", "epics", "legendaries", "userid"]).to_csv(
+        pd.DataFrame(columns=["rank", "username", "score", "gold", "rares", "epics", "legendaries", "userid"]).to_csv(
             OUT_TOTAL, index=False, encoding="utf-8"
         )
         print("[query_2] Нет userId. Созданы пустые CSV.")
@@ -132,10 +124,6 @@ def main():
 
     sql1 = SQL1_FILE.read_text(encoding="utf-8").strip()
 
-    # ВАЖНО: внутри query_1.sql:
-    #   ... WHERE ur."resourceType"='gold'
-    #       AND ur."userId" = ANY(%s)     -- сюда подставим user_ids
-    #       AND (EXISTS(...stars...) OR EXISTS(...stripe...) OR EXISTS(...thirdweb...))
     try:
         df1 = fetch_df(DB1_URL, sql1, params=(user_ids,))
     except Exception as e:
@@ -144,15 +132,14 @@ def main():
             f"Попробую вытянуть всё и отфильтровать в памяти (медленнее).",
             file=sys.stderr,
         )
-        df1_all = fetch_df(DB1_URL, sql1)  # если этот SQL обязателен с параметром — этот шаг может упасть
+        df1_all = fetch_df(DB1_URL, sql1)
         df1_all = norm_lower(df1_all)
         df1_all = ensure_userid(df1_all)
         df1 = df1_all[df1_all["userid"].isin(user_ids)].copy()
 
     if df1.empty:
-        # Никто из списка не прошёл фильтр по транзакциям
         pd.DataFrame(columns=["username", "gold", "userid"]).to_csv(OUT_GOLD, index=False, encoding="utf-8")
-        pd.DataFrame(columns=["username", "gold", "rares", "epics", "legendaries", "userid"]).to_csv(
+        pd.DataFrame(columns=["rank", "username", "score", "gold", "rares", "epics", "legendaries", "userid"]).to_csv(
             OUT_TOTAL, index=False, encoding="utf-8"
         )
         print("[query_1] После фильтра по транзакциям пользователей нет. Созданы пустые CSV.")
@@ -177,22 +164,38 @@ def main():
 
     # --- ШАГ 4: применить снимок (user_snapshot.csv) — вычесть gold по каждому пользователю ---
     snap = load_snapshot(SNAPSHOT_FILE)  # userid, subtract_gold
+    # gold обязательно в число
+    df1["gold"] = pd.to_numeric(df1["gold"], errors="coerce").fillna(0)
+
     if not snap.empty:
-        # приводим gold к числу (если вдруг не числовой формат)
-        df1["gold"] = pd.to_numeric(df1["gold"], errors="coerce").fillna(0)
-        # мёрджим снимок и вычитаем
         df1 = df1.merge(snap, on="userid", how="left")
-        df1["subtract_gold"] = pd.to_numeric(df1["subtract_gold"], errors="coerce").fillna(0)
+        df1["subtract_gold"] = pd.to_numeric(df1.get("subtract_gold"), errors="coerce").fillna(0)
         df1["gold"] = df1["gold"] - df1["subtract_gold"]
         df1 = df1.drop(columns=["subtract_gold"])
     else:
         print("[snapshot] Пустой/отсутствующий снимок — вычитание пропущено.")
 
-    # --- ШАГ 5: объединить с редкостями и сохранить user_total.csv (ПОСЛЕ вычитания) ---
+    # --- ШАГ 5: объединить с редкостями ---
     df2_small = df2[["userid", "rares", "epics", "legendaries"]].copy()
     total = df1.merge(df2_small, on="userid", how="left")
     total[["rares", "epics", "legendaries"]] = total[["rares", "epics", "legendaries"]].fillna(0).astype(int)
-    total = total[["username", "gold", "rares", "epics", "legendaries", "userid"]]
+
+    # --- ШАГ 6: расчёт score и rank ---
+    # score = gold * (1 + 0.001*rares + 0.006*epics + 0.03*legendaries)
+    total["gold"] = pd.to_numeric(total["gold"], errors="coerce").fillna(0)
+    bonus_pct = (
+        0.001 * total["rares"] +
+        0.006 * total["epics"] +
+        0.03  * total["legendaries"]
+    )
+    total["score"] = total["gold"] * (1.0 + bonus_pct)
+
+    # сортировка по score (DESC) и порядковый rank с 1
+    total = total.sort_values(["score", "gold"], ascending=[False, False], kind="mergesort").reset_index(drop=True)
+    total.insert(0, "rank", total.index + 1)
+
+    # --- порядок колонок и сохранение ---
+    total = total[["rank", "username", "score", "gold", "rares", "epics", "legendaries", "userid"]]
     total.to_csv(OUT_TOTAL, index=False, encoding="utf-8")
     print(f"Сохранено {len(total)} строк в {OUT_TOTAL}")
 
