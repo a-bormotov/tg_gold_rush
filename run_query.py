@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import re
 from pathlib import Path
 
 import psycopg2
@@ -144,48 +143,43 @@ def main():
     # --- ШАГ 2: query_1.sql (БД1) — из этих userId оставить только с транзакциями и взять gold/username ---
     if not SQL1_FILE.exists():
         raise FileNotFoundError("Нет файла query_1.sql рядом со скриптом.")
-    
+
     sql1 = SQL1_FILE.read_text(encoding="utf-8").strip()
-    
-    # список user_ids из шага 1 как строки
-    user_ids = [str(u) for u in pd.unique(df2["userid"]).tolist()]
-    if not user_ids:
-        pd.DataFrame(columns=["username", "gold", "userid"]).to_csv(OUT_GOLD, index=False, encoding="utf-8")
-        pd.DataFrame(columns=["rank", "username", "score", "gold", "rares", "epics", "legendaries", "userid"]).to_csv(
-            OUT_TOTAL, index=False, encoding="utf-8"
+
+    try:
+        df1 = fetch_df(DB1_URL, sql1, params=(user_ids,))
+    except Exception as e:
+        print(
+            f"[query_1] Не удалось выполнить с фильтром ANY(%s): {e}\n"
+            f"Попробую вытянуть всё и отфильтровать в памяти (медленнее).",
+            file=sys.stderr,
         )
-        print("[query_2] Пустой список userId. Созданы пустые CSV.")
-        sys.exit(0)
-    
-    # позиционный параметр для ANY(%s): кортеж из одного элемента — списка user_ids
-    params = (user_ids,)
-    
-    # выполняем только с фильтром в БД (ретраи внутри fetch_df)
-    df1 = fetch_df(DB1_URL, sql1, params=params, retries=3, delay=3)
-    
+        df1_all = fetch_df(DB1_URL, sql1)
+        df1_all = norm_lower(df1_all)
+        df1_all = ensure_userid(df1_all)
+        df1 = df1_all[df1_all["userid"].isin(user_ids)].copy()
+
     if df1.empty:
         pd.DataFrame(columns=["username", "gold", "userid"]).to_csv(OUT_GOLD, index=False, encoding="utf-8")
         pd.DataFrame(columns=["rank", "username", "score", "gold", "rares", "epics", "legendaries", "userid"]).to_csv(
             OUT_TOTAL, index=False, encoding="utf-8"
         )
-        print("[query_1] После фильтра по транзакциям/челленджам пользователей нет. Созданы пустые CSV.")
-        sys.exit(0)
-    
+        print("[query_1] После фильтра по транзакциям пользователей нет. Созданы пустые CSV.")
+        return
+
+    # Нормализуем и проверим нужные колонки
     df1 = norm_lower(df1)
     if "userid" not in df1.columns:
         for c in list(df1.columns):
             if c.strip('"').lower() in ("userid", "user id", "user_id"):
                 df1 = df1.rename(columns={c: "userid"})
                 break
-    
-    required_cols = ["username", "gold", "userid"]
-    missing = [c for c in required_cols if c not in df1.columns]
-    if missing:
-        raise RuntimeError(f"[query_1] Отсутствуют колонки {missing}. Найдены: {df1.columns.tolist()}")
-    
-    df1["userid"] = df1["userid"].astype("string")
-    df2["userid"] = df2["userid"].astype("string")
-        
+    for need in ("username", "gold", "userid"):
+        if need not in df1.columns:
+            raise RuntimeError(
+                f"[query_1] Отсутствует колонка '{need}'. Есть: {df1.columns.tolist()}"
+            )
+
     # --- ШАГ 3: сохранить user_gold.csv (ДО вычитания) ---
     df1[["username", "gold", "userid"]].to_csv(OUT_GOLD, index=False, encoding="utf-8")
     print(f"Сохранено {len(df1)} строк в {OUT_GOLD}")
