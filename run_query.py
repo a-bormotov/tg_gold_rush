@@ -155,16 +155,14 @@ def main():
             file=sys.stderr,
         )
         
-        # ⚠️ ВАЖНО: убираем параметризированное условие из SQL перед повторным запуском
-        # Превратим `AND ur."userId" = ANY(%s)` в `AND TRUE` (или просто удалим)
+        # вырезаем параметризованное условие из SQL перед повтором
         sql1_no_param = re.sub(
-            r'AND\s+ur\."userId"\s*=\s*ANY\(\s*%s\s*\)',
+            r'AND\s+ur\."userId"\s*=\s*ANY\(\s*%\(\s*uids\s*\)\s*s\s*\)',
             'AND TRUE',
             sql1,
             flags=re.IGNORECASE
         )
 
-        # Теперь тянем всё и фильтруем в памяти
         df1_all = fetch_df(DB1_URL, sql1)
         df1_all = norm_lower(df1_all)
         df1_all = ensure_userid(df1_all)
