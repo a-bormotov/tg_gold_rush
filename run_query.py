@@ -142,18 +142,14 @@ def main():
         return
 
     # --- ШАГ 2: query_1.sql (БД1) — из этих userId оставить только с транзакциями и взять gold/username ---
-    # Требования к query_1.sql:
-    #   AND ur."userId" = ANY(%(uids)s::text[])    -- именованный параметр и явный каст к text[]
-    #   AND (ur."userId" LIKE 'line:' || '%' OR EXISTS(...) OR EXISTS(...) OR EXISTS(...))
     if not SQL1_FILE.exists():
         raise FileNotFoundError("Нет файла query_1.sql рядом со скриптом.")
     
     sql1 = SQL1_FILE.read_text(encoding="utf-8").strip()
     
-    # используем список user_ids из шага 1 (df2)
+    # список user_ids из шага 1 как строки
     user_ids = [str(u) for u in pd.unique(df2["userid"]).tolist()]
     if not user_ids:
-        # на всякий пожарный (хотя сюда не должны попасть, т.к. проверяли выше)
         pd.DataFrame(columns=["username", "gold", "userid"]).to_csv(OUT_GOLD, index=False, encoding="utf-8")
         pd.DataFrame(columns=["rank", "username", "score", "gold", "rares", "epics", "legendaries", "userid"]).to_csv(
             OUT_TOTAL, index=False, encoding="utf-8"
@@ -161,13 +157,12 @@ def main():
         print("[query_2] Пустой список userId. Созданы пустые CSV.")
         sys.exit(0)
     
-    # именованный параметр для %(uids)s
-    params = {"uids": user_ids}
+    # позиционный параметр для ANY(%s): кортеж из одного элемента — списка user_ids
+    params = (user_ids,)
     
-    # выполняем ТОЛЬКО с фильтром в БД (ретраи внутри fetch_df)
+    # выполняем только с фильтром в БД (ретраи внутри fetch_df)
     df1 = fetch_df(DB1_URL, sql1, params=params, retries=3, delay=3)
     
-    # если после фильтров никого — завершаем красиво
     if df1.empty:
         pd.DataFrame(columns=["username", "gold", "userid"]).to_csv(OUT_GOLD, index=False, encoding="utf-8")
         pd.DataFrame(columns=["rank", "username", "score", "gold", "rares", "epics", "legendaries", "userid"]).to_csv(
@@ -176,7 +171,6 @@ def main():
         print("[query_1] После фильтра по транзакциям/челленджам пользователей нет. Созданы пустые CSV.")
         sys.exit(0)
     
-    # нормализуем и проверим нужные колонки
     df1 = norm_lower(df1)
     if "userid" not in df1.columns:
         for c in list(df1.columns):
@@ -189,10 +183,9 @@ def main():
     if missing:
         raise RuntimeError(f"[query_1] Отсутствуют колонки {missing}. Найдены: {df1.columns.tolist()}")
     
-    # приведение типов для корректного merge далее
     df1["userid"] = df1["userid"].astype("string")
     df2["userid"] = df2["userid"].astype("string")
-    
+        
     # --- ШАГ 3: сохранить user_gold.csv (ДО вычитания) ---
     df1[["username", "gold", "userid"]].to_csv(OUT_GOLD, index=False, encoding="utf-8")
     print(f"Сохранено {len(df1)} строк в {OUT_GOLD}")
