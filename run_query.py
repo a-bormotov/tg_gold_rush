@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import re
 from pathlib import Path
 
 import psycopg2
@@ -147,6 +148,7 @@ def main():
     sql1 = SQL1_FILE.read_text(encoding="utf-8").strip()
 
     try:
+        # позиционный параметр для ANY(%s)
         df1 = fetch_df(DB1_URL, sql1, params=(user_ids,))
     except Exception as e:
         print(
@@ -154,16 +156,16 @@ def main():
             f"Попробую вытянуть всё и отфильтровать в памяти (медленнее).",
             file=sys.stderr,
         )
-        
-        # вырезаем параметризованное условие из SQL перед повтором
+    
+        # вырезаем условие с параметром, чтобы второй запуск был без params
         sql1_no_param = re.sub(
-            r'AND\s+ur\."userId"\s*=\s*ANY\(\s*%\(\s*uids\s*\)\s*s\s*\)',
+            r'AND\s+ur\."userId"\s*=\s*ANY\(\s*%s\s*\)',
             'AND TRUE',
             sql1,
             flags=re.IGNORECASE
         )
-
-        df1_all = fetch_df(DB1_URL, sql1)
+    
+        df1_all = fetch_df(DB1_URL, sql1_no_param)  # без params!
         df1_all = norm_lower(df1_all)
         df1_all = ensure_userid(df1_all)
         df1 = df1_all[df1_all["userid"].isin(user_ids)].copy()

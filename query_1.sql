@@ -11,9 +11,9 @@ LEFT JOIN users u ON u.id = ur."userId"
 WHERE
   ur."resourceType" = 'gold'
   -- список userId из query_2.sql
-  AND ur."userId" = ANY(%(uids)s)
+  AND ur."userId" = ANY(%s)
   AND (
-       ur."userId" LIKE 'line:%'                                  -- все LINE-пользователи проходят
+       ur."userId" LIKE 'line:%%'                                -- ← экранированный %
     OR EXISTS (SELECT 1 FROM stars_transactions    st  WHERE st."userId" = ur."userId")
     OR EXISTS (SELECT 1 FROM stripe_transactions   stp WHERE stp."userId" = ur."userId")
     OR EXISTS (SELECT 1 FROM thirdweb_transactions tw  WHERE tw."userId" = ur."userId")
