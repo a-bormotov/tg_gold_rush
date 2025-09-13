@@ -4,7 +4,6 @@ SELECT
       THEN ur."userId"::text
     ELSE u.username
   END AS username,
-  ur.amount AS gold,
   ur."userId"
 FROM users_resources_total ur
 LEFT JOIN users u ON u.id = ur."userId"
@@ -12,7 +11,7 @@ WHERE
   ur."resourceType" = 'gold'
   AND ur."userId" = ANY(%s)
   AND (
-       position('line:' in ur."userId") = 1  -- все LINE-пользователи проходят
+       position('line:' in ur."userId") = 1
     OR EXISTS (SELECT 1 FROM stars_transactions    st  WHERE st."userId" = ur."userId")
     OR EXISTS (SELECT 1 FROM stripe_transactions   stp WHERE stp."userId" = ur."userId")
     OR EXISTS (SELECT 1 FROM thirdweb_transactions tw  WHERE tw."userId" = ur."userId")
