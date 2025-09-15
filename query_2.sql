@@ -13,15 +13,8 @@ WITH flattened AS (
 gold_cte AS (
   SELECT
     e."userId",
-    SUM(
-      CASE
-        WHEN e."name" = 'ClaimChallengesAction'
-          THEN (e.payload::jsonb #>> '{output,gold,amount}')::bigint
-        WHEN e."name" = 'UnlockChallengeAction'
-          THEN (e.payload::jsonb #>> '{output,rewards,gold,amount}')::bigint
-        ELSE 0
-      END
-    ) AS gold
+    SUM( COALESCE((e.payload::jsonb #>> '{output,gold,amount}')::bigint, 0) ) +
+	SUM( COALESCE((e.payload::jsonb #>> '{output,rewards,gold,amount}')::bigint, 0) ) AS gold
   FROM events e
   WHERE
     e."createdAt" >= TIMESTAMP '2025-09-11 16:00:00'
