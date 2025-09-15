@@ -20,12 +20,6 @@ gold_cte AS (
     e."createdAt" >= TIMESTAMP '2025-09-11 16:00:00'
     AND e."createdAt" <  TIMESTAMP '2025-09-16 16:00:00'
     AND e."name" IN ('ClaimChallengesAction','UnlockChallengeAction')
-    AND (
-         (e."name" = 'ClaimChallengesAction'
-          AND e.payload::jsonb #>> '{output,gold,amount}' IS NOT NULL)
-      OR (e."name" = 'UnlockChallengeAction'
-          AND e.payload::jsonb #>> '{output,rewards,gold,amount}' IS NOT NULL)
-    )
   GROUP BY e."userId"
 )
 SELECT
