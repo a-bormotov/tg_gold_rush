@@ -1,17 +1,18 @@
--- Принимает один параметр: %s :: text[]
--- Сохраняем порядок через WITH ORDINALITY
-WITH ids AS (
-  SELECT id, ord
-  FROM UNNEST(%s::text[]) WITH ORDINALITY AS t(id, ord)
+-- Ожидает, что в текущей сессии уже создана TEMP TABLE ids(id text, ord int).
+-- Возвращает userId, username, ord в исходном порядке.
+
+WITH src AS (
+  SELECT id, ord FROM ids
 )
 SELECT
-  i.id AS "userId",
+  src.id AS "userId",
   CASE
     WHEN u.username = 'Secret Dino' OR u.username IS NULL OR u.username = ''
-      THEN i.id::text
+      THEN src.id
     ELSE u.username
   END AS username,
-  i.ord
-FROM ids i
-LEFT JOIN users u ON u.id = i.id  -- обе стороны text, без кастов
-ORDER BY i.ord;
+  src.ord
+FROM src
+LEFT JOIN users u
+  ON u.id::text = src.id
+ORDER BY src.ord;

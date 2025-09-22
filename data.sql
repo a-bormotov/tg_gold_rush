@@ -5,7 +5,7 @@ WITH ewin AS (
   SELECT *
   FROM events
   WHERE "createdAt" >= TIMESTAMP '2025-09-19 16:00:00'
-    AND "createdAt" <  TIMESTAMP '2025-09-26 16:00:00'
+    AND "createdAt" <  TIMESTAMP '2025-09-29 16:00:00'
     AND "name" IN ('ClaimChallengesAction','UnlockChallengeAction','SpendGachaAction')
 ),
 

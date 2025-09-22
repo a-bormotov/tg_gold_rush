@@ -2,38 +2,36 @@
 import os
 import sys
 import csv
-import tempfile
-from contextlib import contextmanager
 from decimal import Decimal
+from contextlib import contextmanager
+from tempfile import NamedTemporaryFile
 
 import psycopg2
+from psycopg2.extras import execute_values
 
-# -------- helpers --------
 def die(msg, code=1):
-    print(f"[ERROR] {msg}", file=sys.stderr); sys.exit(code)
+    print(f"[ERROR] {msg}", file=sys.stderr)
+    sys.exit(code)
 
 def bool_env(name, default=False):
     return os.getenv(name, str(default)).strip().lower() in ("1","true","yes","y","on")
 
 def read_sql(path: str) -> str:
-    if not os.path.exists(path): die(f"SQL file not found: {path}")
+    if not os.path.exists(path):
+        die(f"SQL file not found: {path}")
     return open(path, "r", encoding="utf-8").read().strip().rstrip(";")
-
-# -------- SSH tunnel --------
-from tempfile import NamedTemporaryFile
-from contextlib import contextmanager
 
 @contextmanager
 def ssh_tunnel_if_needed(use_ssh: bool, db_host: str, db_port: int,
                          ssh_host: str|None, ssh_port: int|None,
                          ssh_user: str|None, ssh_private_key: str|None):
     if not use_ssh:
-        yield db_host, db_port, None; return
+        yield db_host, db_port, None
+        return
     try:
         from sshtunnel import SSHTunnelForwarder
     except Exception as e:
         die(f"sshtunnel is required when SSH is enabled: {e}")
-
     if not ssh_host or not ssh_user or not ssh_private_key:
         die("SSH is enabled, but SSH host/user/key are missing (check SSH*_HOST/SSH*_USER/SSH*_PRIVATE_KEY).")
 
@@ -63,7 +61,6 @@ def ssh_tunnel_if_needed(use_ssh: bool, db_host: str, db_port: int,
             try: os.remove(key_path)
             except Exception: pass
 
-# -------- DB utils --------
 def build_connect_kwargs(db_name=None, db_user=None, db_pass=None, sslmode=None, stmt_timeout_ms="0", dsn_url=None):
     if dsn_url:
         return {"dsn": dsn_url, "connect_timeout": 30, "options": f"-c statement_timeout={(stmt_timeout_ms or '0').strip() or '0'}"}
@@ -88,35 +85,38 @@ def save_csv(cols, rows, path):
         w = csv.writer(f); w.writerow(cols); [w.writerow(list(r)) for r in rows]
     print(f"[OK] Saved CSV → {path} ({len(rows)} rows)")
 
-# -------- main --------
 def main():
-    # DB1
-    DB1_HOST, DB1_NAME, DB1_PASSWORD, DB1_PORT, DB1_USER = \
-        os.getenv("DB1_HOST"), os.getenv("DB1_NAME"), os.getenv("DB1_PASSWORD"), int(os.getenv("DB1_PORT","5432")), os.getenv("DB1_USER")
-    DB1_SSLMODE = os.getenv("DB1_SSLMODE"); DB1_STMT_MS = os.getenv("DB1_STATEMENT_TIMEOUT_MS","0")
+    # ---- DB1
+    DB1_HOST=os.getenv("DB1_HOST"); DB1_NAME=os.getenv("DB1_NAME"); DB1_PASSWORD=os.getenv("DB1_PASSWORD")
+    DB1_PORT=int(os.getenv("DB1_PORT","5432")); DB1_USER=os.getenv("DB1_USER")
+    DB1_SSLMODE=os.getenv("DB1_SSLMODE"); DB1_STMT_MS=os.getenv("DB1_STATEMENT_TIMEOUT_MS","0")
 
-    # DB2
-    DB2_HOST, DB2_NAME, DB2_PASSWORD, DB2_PORT, DB2_USER = \
-        os.getenv("DB2_HOST"), os.getenv("DB2_NAME"), os.getenv("DB2_PASSWORD"), int(os.getenv("DB2_PORT","5432")), os.getenv("DB2_USER")
-    DB2_SSLMODE = os.getenv("DB2_SSLMODE"); DB2_STMT_MS = os.getenv("DB2_STATEMENT_TIMEOUT_MS", DB1_STMT_MS)
+    # ---- DB2
+    DB2_HOST=os.getenv("DB2_HOST"); DB2_NAME=os.getenv("DB2_NAME"); DB2_PASSWORD=os.getenv("DB2_PASSWORD")
+    DB2_PORT=int(os.getenv("DB2_PORT","5432")); DB2_USER=os.getenv("DB2_USER")
+    DB2_SSLMODE=os.getenv("DB2_SSLMODE"); DB2_STMT_MS=os.getenv("DB2_STATEMENT_TIMEOUT_MS", DB1_STMT_MS)
 
-    # SSH flags + creds
+    # ---- SSH flags + creds
     USE_SSH_GLOBAL = bool_env("USE_SSH", False)
     USE_SSH_DB1 = bool_env("USE_SSH_DB1", USE_SSH_GLOBAL)
     USE_SSH_DB2 = bool_env("USE_SSH_DB2", USE_SSH_GLOBAL)
 
-    SSH1_HOST=os.getenv("SSH1_HOST"); SSH1_PORT=os.getenv("SSH1_PORT","22"); SSH1_USER=os.getenv("SSH1_USER"); SSH1_PRIVATE_KEY=os.getenv("SSH1_PRIVATE_KEY")
+    SSH1_HOST=os.getenv("SSH1_HOST"); SSH1_PORT=os.getenv("SSH1_PORT","22")
+    SSH1_USER=os.getenv("SSH1_USER"); SSH1_PRIVATE_KEY=os.getenv("SSH1_PRIVATE_KEY")
+
     SSH2_HOST=os.getenv("SSH2_HOST") or SSH1_HOST
     SSH2_PORT=os.getenv("SSH2_PORT","22") or SSH1_PORT
     SSH2_USER=os.getenv("SSH2_USER") or SSH1_USER
     SSH2_PRIVATE_KEY=os.getenv("SSH2_PRIVATE_KEY") or SSH1_PRIVATE_KEY
 
-    # files
-    SQL_FILE=os.getenv("SQL_FILE","data.sql"); USER_SQL_FILE=os.getenv("USER_SQL_FILE","user_data.sql")
-    RAW_CSV=os.getenv("OUTPUT_CSV","raw_data.csv"); RESULT_CSV=os.getenv("RESULT_CSV","result_data.csv")
+    # ---- files
+    SQL_FILE=os.getenv("SQL_FILE","data.sql")
+    USER_SQL_FILE=os.getenv("USER_SQL_FILE","user_data.sql")
+    RAW_CSV=os.getenv("OUTPUT_CSV","raw_data.csv")
+    RESULT_CSV=os.getenv("RESULT_CSV","result_data.csv")
     TOP_N=int(os.getenv("TOP_N","3000"))
 
-    # validate
+    # ---- validation
     for v,n in [(DB1_HOST,"DB1_HOST"),(DB1_NAME,"DB1_NAME"),(DB1_PASSWORD,"DB1_PASSWORD"),(DB1_USER,"DB1_USER")]:
         if not v: die(f"Missing required env var: {n}")
     for v,n in [(DB2_HOST,"DB2_HOST"),(DB2_NAME,"DB2_NAME"),(DB2_PASSWORD,"DB2_PASSWORD"),(DB2_USER,"DB2_USER")]:
@@ -125,13 +125,13 @@ def main():
     sql1 = read_sql(SQL_FILE)
     sql2 = read_sql(USER_SQL_FILE)
 
-    # ---- DB1: first query
+    # ---- DB1: основной запрос
     db1_kwargs = build_connect_kwargs(DB1_NAME, DB1_USER, DB1_PASSWORD, DB1_SSLMODE, DB1_STMT_MS)
     with ssh_tunnel_if_needed(USE_SSH_DB1, DB1_HOST, DB1_PORT, SSH1_HOST, SSH1_PORT, SSH1_USER, SSH1_PRIVATE_KEY) as (h1,p1,_):
         cols1, rows1 = run_select_rows(db1_kwargs, h1, p1, sql1)
     save_csv(cols1, rows1, RAW_CSV)
 
-    # find columns
+    # столбцы и сортировка TOP_N
     try:
         i_user = cols1.index("userId"); i_score = cols1.index("score"); i_purple = cols1.index("purple"); i_leg = cols1.index("legendaries")
     except ValueError as e:
@@ -141,21 +141,30 @@ def main():
         try: return Decimal(str(x))
         except Exception: return Decimal(0)
 
-    # sort + TOP_N
-    rows_sorted = sorted(rows1, key=lambda r: (to_num(r[i_score])*-1, to_num(r[i_purple])*-1, to_num(r[i_leg])*-1, r[i_user]))
+    rows_sorted = sorted(
+        rows1,
+        key=lambda r: (to_num(r[i_score])*-1, to_num(r[i_purple])*-1, to_num(r[i_leg])*-1, str(r[i_user]))
+    )
     top_rows = rows_sorted[:TOP_N]
-    top_user_ids = [str(r[i_user]) for r in top_rows]  # ВСЕГДА СТРОКИ!
+    top_user_ids = [str(r[i_user]) for r in top_rows]  # как строки
 
-    # ---- DB2: usernames via text[] param
-    if top_user_ids:
-        db2_kwargs = build_connect_kwargs(DB2_NAME, DB2_USER, DB2_PASSWORD, DB2_SSLMODE, DB2_STMT_MS)
-        with ssh_tunnel_if_needed(USE_SSH_DB2, DB2_HOST, DB2_PORT, SSH2_HOST, SSH2_PORT, SSH2_USER, SSH2_PRIVATE_KEY) as (h2,p2,_):
-            cols2, rows2 = run_select_rows(db2_kwargs, h2, p2, sql2, (top_user_ids,))  # text[]
-        uname_by_id = {row[0]: row[1] for row in rows2}  # key: text userId
-    else:
-        uname_by_id = {}
+    # ---- DB2: usernames через TEMP TABLE ids
+    db2_kwargs = build_connect_kwargs(DB2_NAME, DB2_USER, DB2_PASSWORD, DB2_SSLMODE, DB2_STMT_MS)
+    with ssh_tunnel_if_needed(USE_SSH_DB2, DB2_HOST, DB2_PORT, SSH2_HOST, SSH2_PORT, SSH2_USER, SSH2_PRIVATE_KEY) as (h2,p2,_):
+        kw = dict(db2_kwargs); kw["host"]=h2; kw["port"]=int(p2)
+        with psycopg2.connect(**kw) as conn:
+            with conn.cursor() as cur:
+                # temp table живёт в сессии до конца соединения
+                cur.execute("CREATE TEMP TABLE ids(id text, ord int) ON COMMIT DROP;")
+                data = [(uid, idx+1) for idx, uid in enumerate(top_user_ids)]
+                execute_values(cur, "INSERT INTO ids(id, ord) VALUES %s", data, page_size=1000)
+                cur.execute(sql2)
+                cols2 = [d[0] for d in cur.description]
+                rows2 = cur.fetchall()
 
-    # assemble result
+    uname_by_id = {row[0]: row[1] for row in rows2}  # userId(text) -> username
+
+    # ---- финальный CSV
     result_cols = ["username","score","purple","legendaries","userId"]
     result_rows = []
     for r in top_rows:
