@@ -1,4 +1,3 @@
--- В CTE ids подставляется VALUES %s из Python (id text, ord int)
 WITH ids(id, ord) AS (
   VALUES %s
 )
