@@ -4,7 +4,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write
+  contents: write  # нужно, чтобы пушить CSV в репозиторий
 
 jobs:
   run-query:
@@ -26,39 +26,46 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
+          # пины: sshtunnel 0.4.0 несовместим с новыми paramiko
           pip install "psycopg2-binary==2.9.9" "sshtunnel==0.4.0" "paramiko==3.3.1"
 
       - name: Run queries and build CSVs
         env:
-          # ---- DB1 (источник raw_data)
-          DB1_HOST: ${{ secrets.DB1_HOST }}
-          DB1_NAME: ${{ secrets.DB1_NAME }}
-          DB1_PASSWORD: ${{ secrets.DB1_PASSWORD }}
-          DB1_PORT: ${{ secrets.DB1_PORT }}
-          DB1_USER: ${{ secrets.DB1_USER }}
-          DB1_SSLMODE: ${{ secrets.DB1_SSLMODE }}
-          DB1_STATEMENT_TIMEOUT_MS: ${{ secrets.DB1_STATEMENT_TIMEOUT_MS }}
-          # ---- DB2 (usernames)
-          DB2_HOST: ${{ secrets.DB2_HOST }}
-          DB2_NAME: ${{ secrets.DB2_NAME }}
-          DB2_PASSWORD: ${{ secrets.DB2_PASSWORD }}
-          DB2_PORT: ${{ secrets.DB2_PORT }}
-          DB2_USER: ${{ secrets.DB2_USER }}
-          DB2_SSLMODE: ${{ secrets.DB2_SSLMODE }}
-          DB2_STATEMENT_TIMEOUT_MS: ${{ secrets.DB2_STATEMENT_TIMEOUT_MS }}
-          # ---- SSH
-          USE_SSH: ${{ secrets.USE_SSH }}
-          USE_SSH_DB1: ${{ secrets.USE_SSH_DB1 }}
-          USE_SSH_DB2: ${{ secrets.USE_SSH_DB2 }}
+          # ---- ВКЛЮЧАЕМ SSH-ТУННЕЛИ ДЛЯ ОБЕИХ БАЗ ----
+          USE_SSH_DB1: "true"
+          USE_SSH_DB2: "true"
+
+          # ---- SSH для DB1 (может совпадать с SSH2_*)
           SSH1_HOST: ${{ secrets.SSH1_HOST }}
           SSH1_PORT: ${{ secrets.SSH1_PORT }}
-          SSH1_PRIVATE_KEY: ${{ secrets.SSH1_PRIVATE_KEY }}
           SSH1_USER: ${{ secrets.SSH1_USER }}
+          SSH1_PRIVATE_KEY: ${{ secrets.SSH1_PRIVATE_KEY }}
+
+          # ---- SSH для DB2 (может совпадать с SSH1_*)
           SSH2_HOST: ${{ secrets.SSH2_HOST }}
           SSH2_PORT: ${{ secrets.SSH2_PORT }}
-          SSH2_PRIVATE_KEY: ${{ secrets.SSH2_PRIVATE_KEY }}
           SSH2_USER: ${{ secrets.SSH2_USER }}
-          # ---- файлы и лимиты
+          SSH2_PRIVATE_KEY: ${{ secrets.SSH2_PRIVATE_KEY }}
+
+          # ---- DB1 (хост/порт как их видит bastion)
+          DB1_HOST: ${{ secrets.DB1_HOST }}
+          DB1_PORT: ${{ secrets.DB1_PORT }}
+          DB1_NAME: ${{ secrets.DB1_NAME }}
+          DB1_USER: ${{ secrets.DB1_USER }}
+          DB1_PASSWORD: ${{ secrets.DB1_PASSWORD }}
+          DB1_SSLMODE: ${{ secrets.DB1_SSLMODE }}
+          DB1_STATEMENT_TIMEOUT_MS: ${{ secrets.DB1_STATEMENT_TIMEOUT_MS }}
+
+          # ---- DB2 (хост/порт как их видит bastion)
+          DB2_HOST: ${{ secrets.DB2_HOST }}
+          DB2_PORT: ${{ secrets.DB2_PORT }}
+          DB2_NAME: ${{ secrets.DB2_NAME }}
+          DB2_USER: ${{ secrets.DB2_USER }}
+          DB2_PASSWORD: ${{ secrets.DB2_PASSWORD }}
+          DB2_SSLMODE: ${{ secrets.DB2_SSLMODE }}
+          DB2_STATEMENT_TIMEOUT_MS: ${{ secrets.DB2_STATEMENT_TIMEOUT_MS }}
+
+          # ---- файлы и лимит
           SQL_FILE: data.sql
           USER_SQL_FILE: user_data.sql
           OUTPUT_CSV: raw_data.csv
