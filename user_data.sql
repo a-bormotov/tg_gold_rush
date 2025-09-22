@@ -1,18 +1,16 @@
--- Ожидает, что в текущей сессии уже создана TEMP TABLE ids(id text, ord int).
--- Возвращает userId, username, ord в исходном порядке.
-
-WITH src AS (
-  SELECT id, ord FROM ids
+-- В CTE ids подставляется VALUES %s из Python (id text, ord int)
+WITH ids(id, ord) AS (
+  VALUES %s
 )
 SELECT
-  src.id AS "userId",
+  ids.id AS "userId",
   CASE
     WHEN u.username = 'Secret Dino' OR u.username IS NULL OR u.username = ''
-      THEN src.id
+      THEN ids.id
     ELSE u.username
   END AS username,
-  src.ord
-FROM src
+  ids.ord
+FROM ids
 LEFT JOIN users u
-  ON u.id::text = src.id
-ORDER BY src.ord;
+  ON u.id::text = ids.id
+ORDER BY ids.ord;

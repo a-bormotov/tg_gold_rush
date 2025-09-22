@@ -10,15 +10,13 @@ import psycopg2
 from psycopg2.extras import execute_values
 
 def die(msg, code=1):
-    print(f"[ERROR] {msg}", file=sys.stderr)
-    sys.exit(code)
+    print(f"[ERROR] {msg}", file=sys.stderr); sys.exit(code)
 
 def bool_env(name, default=False):
     return os.getenv(name, str(default)).strip().lower() in ("1","true","yes","y","on")
 
 def read_sql(path: str) -> str:
-    if not os.path.exists(path):
-        die(f"SQL file not found: {path}")
+    if not os.path.exists(path): die(f"SQL file not found: {path}")
     return open(path, "r", encoding="utf-8").read().strip().rstrip(";")
 
 @contextmanager
@@ -26,8 +24,7 @@ def ssh_tunnel_if_needed(use_ssh: bool, db_host: str, db_port: int,
                          ssh_host: str|None, ssh_port: int|None,
                          ssh_user: str|None, ssh_private_key: str|None):
     if not use_ssh:
-        yield db_host, db_port, None
-        return
+        yield db_host, db_port, None; return
     try:
         from sshtunnel import SSHTunnelForwarder
     except Exception as e:
@@ -146,19 +143,18 @@ def main():
         key=lambda r: (to_num(r[i_score])*-1, to_num(r[i_purple])*-1, to_num(r[i_leg])*-1, str(r[i_user]))
     )
     top_rows = rows_sorted[:TOP_N]
-    top_user_ids = [str(r[i_user]) for r in top_rows]  # как строки
+    top_user_ids = [str(r[i_user]) for r in top_rows]  # строки
 
-    # ---- DB2: usernames через TEMP TABLE ids
+    # ---- DB2: usernames без temp table (read-only friendly)
     db2_kwargs = build_connect_kwargs(DB2_NAME, DB2_USER, DB2_PASSWORD, DB2_SSLMODE, DB2_STMT_MS)
     with ssh_tunnel_if_needed(USE_SSH_DB2, DB2_HOST, DB2_PORT, SSH2_HOST, SSH2_PORT, SSH2_USER, SSH2_PRIVATE_KEY) as (h2,p2,_):
         kw = dict(db2_kwargs); kw["host"]=h2; kw["port"]=int(p2)
         with psycopg2.connect(**kw) as conn:
             with conn.cursor() as cur:
-                # temp table живёт в сессии до конца соединения
-                cur.execute("CREATE TEMP TABLE ids(id text, ord int) ON COMMIT DROP;")
+                # строим VALUES (id, ord), (id, ord), ...
                 data = [(uid, idx+1) for idx, uid in enumerate(top_user_ids)]
-                execute_values(cur, "INSERT INTO ids(id, ord) VALUES %s", data, page_size=1000)
-                cur.execute(sql2)
+                # user_data.sql содержит "WITH ids(id, ord) AS (VALUES %s) SELECT ..."
+                execute_values(cur, sql2, data, template="(%s,%s)")
                 cols2 = [d[0] for d in cur.description]
                 rows2 = cur.fetchall()
 
