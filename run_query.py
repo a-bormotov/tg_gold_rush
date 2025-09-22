@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import os
 import sys
-import csv
 import tempfile
 from contextlib import contextmanager
 
@@ -31,7 +30,8 @@ def read_sql(path: str) -> str:
     if not os.path.exists(path):
         die(f"SQL file not found: {path}")
     with open(path, "r", encoding="utf-8") as f:
-        return f.read().strip().rstrip(";")  # COPY (...) не любит завершающую точку с запятой
+        # COPY (...) TO STDOUT не любит завершающую ';'
+        return f.read().strip().rstrip(";")
 
 @contextmanager
 def maybe_ssh_tunnel():
@@ -48,7 +48,7 @@ def maybe_ssh_tunnel():
     if not SSH_PRIVATE_KEY:
         die("USE_SSH=true, но SSH1_PRIVATE_KEY не задан.")
 
-    # записываем ключ во временный файл (600)
+    # сохраняем ключ во временный файл (600)
     with tempfile.NamedTemporaryFile("w", delete=False) as key_file:
         key_file.write(SSH_PRIVATE_KEY)
         key_path = key_file.name
@@ -85,8 +85,15 @@ def run_query_to_csv(sql: str, out_csv: str):
         "password": DB_PASS,
         "connect_timeout": 30,
     }
+
+    # SSL режим при необходимости
     if os.getenv("DB1_SSLMODE"):
         connect_kwargs["sslmode"] = os.getenv("DB1_SSLMODE")
+
+    # Таймаут запроса через startup packet (работает даже с пулами)
+    # 0 = без лимита
+    stmt_timeout_ms = os.getenv("DB1_STATEMENT_TIMEOUT_MS", "0").strip() or "0"
+    connect_kwargs["options"] = f"-c statement_timeout={stmt_timeout_ms}"
 
     with maybe_ssh_tunnel() as (host, port, _tunnel):
         connect_kwargs["host"] = host
@@ -94,9 +101,6 @@ def run_query_to_csv(sql: str, out_csv: str):
 
         with psycopg2.connect(**connect_kwargs) as conn:
             with conn.cursor() as cur:
-                # таймаут 15 минут
-                cur.execute("SET statement_timeout = 900000;")
-                # стримим напрямую через COPY, чтобы не грузить всё в память
                 copy_sql = f"COPY ({sql}) TO STDOUT WITH CSV HEADER"
                 with open(out_csv, "w", encoding="utf-8", newline="") as f:
                     cur.copy_expert(copy_sql, f)
@@ -104,7 +108,7 @@ def run_query_to_csv(sql: str, out_csv: str):
     print(f"[OK] Saved CSV → {out_csv}")
 
 def main():
-    # валидация переменных
+    # проверим необходимые переменные
     for v, name in [(DB_HOST, "DB1_HOST"), (DB_NAME, "DB1_NAME"), (DB_PASS, "DB1_PASSWORD"), (DB_USER, "DB1_USER")]:
         if not v:
             die(f"Missing required env var: {name}")
