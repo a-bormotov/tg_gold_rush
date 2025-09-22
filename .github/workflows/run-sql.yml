@@ -1,10 +1,10 @@
 name: Run SQL and export CSV
 
 on:
-  workflow_dispatch: {}  # ручной запуск
+  workflow_dispatch: {}
 
 permissions:
-  contents: write  # нужно, чтобы пушить изменения в репозиторий
+  contents: write
 
 jobs:
   run-query:
@@ -26,50 +26,65 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          # пины: sshtunnel 0.4.0 несовместим с новыми paramiko
           pip install "psycopg2-binary==2.9.9" "sshtunnel==0.4.0" "paramiko==3.3.1"
 
-      - name: Run query (data.sql → raw_data.csv)
+      - name: Run queries and build CSVs
         env:
-          # DB
+          # ---- DB1 (источник raw_data)
           DB1_HOST: ${{ secrets.DB1_HOST }}
           DB1_NAME: ${{ secrets.DB1_NAME }}
           DB1_PASSWORD: ${{ secrets.DB1_PASSWORD }}
           DB1_PORT: ${{ secrets.DB1_PORT }}
           DB1_USER: ${{ secrets.DB1_USER }}
-          DB1_SSLMODE: ${{ secrets.DB1_SSLMODE }}       # опционально, например "require"
-          # Таймаут запроса (мс) — 0 = без лимита
+          DB1_SSLMODE: ${{ secrets.DB1_SSLMODE }}
           DB1_STATEMENT_TIMEOUT_MS: ${{ secrets.DB1_STATEMENT_TIMEOUT_MS }}
-          # SSH (если нужен бастион)
-          USE_SSH: ${{ secrets.USE_SSH }}               # "true"/"false"
+          # ---- DB2 (usernames)
+          DB2_HOST: ${{ secrets.DB2_HOST }}
+          DB2_NAME: ${{ secrets.DB2_NAME }}
+          DB2_PASSWORD: ${{ secrets.DB2_PASSWORD }}
+          DB2_PORT: ${{ secrets.DB2_PORT }}
+          DB2_USER: ${{ secrets.DB2_USER }}
+          DB2_SSLMODE: ${{ secrets.DB2_SSLMODE }}
+          DB2_STATEMENT_TIMEOUT_MS: ${{ secrets.DB2_STATEMENT_TIMEOUT_MS }}
+          # ---- SSH
+          USE_SSH: ${{ secrets.USE_SSH }}
+          USE_SSH_DB1: ${{ secrets.USE_SSH_DB1 }}
+          USE_SSH_DB2: ${{ secrets.USE_SSH_DB2 }}
           SSH1_HOST: ${{ secrets.SSH1_HOST }}
           SSH1_PORT: ${{ secrets.SSH1_PORT }}
           SSH1_PRIVATE_KEY: ${{ secrets.SSH1_PRIVATE_KEY }}
           SSH1_USER: ${{ secrets.SSH1_USER }}
-          # Файлы
+          SSH2_HOST: ${{ secrets.SSH2_HOST }}
+          SSH2_PORT: ${{ secrets.SSH2_PORT }}
+          SSH2_PRIVATE_KEY: ${{ secrets.SSH2_PRIVATE_KEY }}
+          SSH2_USER: ${{ secrets.SSH2_USER }}
+          # ---- файлы и лимиты
           SQL_FILE: data.sql
+          USER_SQL_FILE: user_data.sql
           OUTPUT_CSV: raw_data.csv
+          RESULT_CSV: result_data.csv
+          TOP_N: 3000
         run: |
           python run_query.py
 
-      - name: Commit CSV to repo root
-        # коммитим только если файл реально изменился
+      - name: Commit CSVs to repo root
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # актуализируем ветку на случай, если появились новые коммиты
           git pull --rebase origin "${{ github.ref_name }}"
-          git add raw_data.csv
+          git add raw_data.csv result_data.csv
           if git diff --staged --quiet; then
-            echo "No changes in raw_data.csv — skipping commit."
-          else
-            git commit -m "Update raw_data.csv [skip ci]"
+            echo "No changes — skipping commit."
+          else:
+            git commit -m "Update raw_data.csv & result_data.csv [skip ci]"
             git push origin HEAD:${{ github.ref_name }}
           fi
 
-      - name: Upload CSV artifact (optional)
+      - name: Upload artifacts (optional)
         uses: actions/upload-artifact@v4
         with:
-          name: raw_data
-          path: raw_data.csv
+          name: csv_outputs
+          path: |
+            raw_data.csv
+            result_data.csv
           if-no-files-found: error
