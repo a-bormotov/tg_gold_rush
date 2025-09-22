@@ -1,139 +1,118 @@
+#!/usr/bin/env python3
 import os
 import sys
-import time
-from pathlib import Path
+import csv
+import tempfile
+from contextlib import contextmanager
 
 import psycopg2
-import pandas as pd
-from psycopg2 import OperationalError, InterfaceError
 
-# Подключения
-DB1_URL = os.getenv("DB1_URL")  # БД ресурсов/пользователей/транзакций (query_1.sql)
-DB2_URL = os.getenv("DB2_URL")  # БД событий (query_2.sql)
+USE_SSH = os.getenv("USE_SSH", "false").strip().lower() in ("1", "true", "yes", "y", "on")
 
-SQL1_FILE = Path("query_1.sql")
-SQL2_FILE = Path("query_2.sql")
+DB_HOST = os.getenv("DB1_HOST")
+DB_NAME = os.getenv("DB1_NAME")
+DB_PASS = os.getenv("DB1_PASSWORD")
+DB_PORT = int(os.getenv("DB1_PORT", "5432"))
+DB_USER = os.getenv("DB1_USER")
 
-OUT_GOLD  = Path("user_gold.csv")   # теперь из query_2 + username
-OUT_TOTAL = Path("user_total.csv")  # итог с редкостями и score
+SSH_HOST = os.getenv("SSH1_HOST")
+SSH_PORT = int(os.getenv("SSH1_PORT", "22"))
+SSH_USER = os.getenv("SSH1_USER")
+SSH_PRIVATE_KEY = os.getenv("SSH1_PRIVATE_KEY")
 
-def fetch_df(conn_url: str, sql: str, params=None, retries: int = 3, delay: int = 3) -> pd.DataFrame:
-    """Выполнить SQL и вернуть DataFrame с ретраями и TCP keepalive."""
-    if not conn_url:
-        raise RuntimeError("Не задан URL подключения к БД.")
-    last_err = None
-    for attempt in range(1, retries + 1):
+SQL_FILE = os.getenv("SQL_FILE", "data.sql")
+OUTPUT_CSV = os.getenv("OUTPUT_CSV", "raw_data.csv")
+
+def die(msg, code=1):
+    print(f"[ERROR] {msg}", file=sys.stderr)
+    sys.exit(code)
+
+def read_sql(path: str) -> str:
+    if not os.path.exists(path):
+        die(f"SQL file not found: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read().strip().rstrip(";")  # COPY (...) не любит завершающую точку с запятой
+
+@contextmanager
+def maybe_ssh_tunnel():
+    """Если USE_SSH=true — поднимаем SSH-туннель, иначе возвращаем исходные DB_HOST/DB_PORT."""
+    if not USE_SSH:
+        yield DB_HOST, DB_PORT, None
+        return
+
+    try:
+        from sshtunnel import SSHTunnelForwarder
+    except Exception as e:
+        die(f"sshtunnel is required when USE_SSH=true: {e}")
+
+    if not SSH_PRIVATE_KEY:
+        die("USE_SSH=true, но SSH1_PRIVATE_KEY не задан.")
+
+    # записываем ключ во временный файл (600)
+    with tempfile.NamedTemporaryFile("w", delete=False) as key_file:
+        key_file.write(SSH_PRIVATE_KEY)
+        key_path = key_file.name
+    os.chmod(key_path, 0o600)
+
+    tunnel = None
+    try:
+        tunnel = SSHTunnelForwarder(
+            (SSH_HOST, SSH_PORT),
+            ssh_username=SSH_USER,
+            ssh_pkey=key_path,
+            remote_bind_address=(DB_HOST, DB_PORT),
+            local_bind_address=("127.0.0.1", 0),
+        )
+        tunnel.start()
+        local_host, local_port = tunnel.local_bind_host, tunnel.local_bind_port
+        print(f"[INFO] SSH tunnel: {local_host}:{local_port} → {DB_HOST}:{DB_PORT}")
+        yield local_host, local_port, tunnel
+    finally:
         try:
-            conn = psycopg2.connect(
-                conn_url,
-                keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=5,
-            )
+            if tunnel and tunnel.is_active:
+                tunnel.stop()
+                print("[INFO] SSH tunnel closed.")
+        finally:
             try:
-                return pd.read_sql(sql, conn, params=params)
-            finally:
-                conn.close()
-        except (OperationalError, InterfaceError) as e:
-            last_err = e
-            print(f"[fetch_df] attempt {attempt}/{retries} failed: {e}", file=sys.stderr)
-            time.sleep(delay)
-    raise last_err
+                os.remove(key_path)
+            except Exception:
+                pass
 
-def norm_lower(df: pd.DataFrame) -> pd.DataFrame:
-    return df.rename(columns={c: c.lower().strip() for c in df.columns})
+def run_query_to_csv(sql: str, out_csv: str):
+    connect_kwargs = {
+        "dbname": DB_NAME,
+        "user": DB_USER,
+        "password": DB_PASS,
+        "connect_timeout": 30,
+    }
+    if os.getenv("DB1_SSLMODE"):
+        connect_kwargs["sslmode"] = os.getenv("DB1_SSLMODE")
 
-def ensure_userid(df: pd.DataFrame) -> pd.DataFrame:
-    if "userid" in df.columns:
-        return df
-    for c in list(df.columns):
-        if c.strip('"').lower() in ("userid", "user id", "user_id"):
-            return df.rename(columns={c: "userid"})
-    raise RuntimeError(f"Не найдена колонка userId. Есть: {df.columns.tolist()}")
+    with maybe_ssh_tunnel() as (host, port, _tunnel):
+        connect_kwargs["host"] = host
+        connect_kwargs["port"] = port
+
+        with psycopg2.connect(**connect_kwargs) as conn:
+            with conn.cursor() as cur:
+                # таймаут 15 минут
+                cur.execute("SET statement_timeout = 900000;")
+                # стримим напрямую через COPY, чтобы не грузить всё в память
+                copy_sql = f"COPY ({sql}) TO STDOUT WITH CSV HEADER"
+                with open(out_csv, "w", encoding="utf-8", newline="") as f:
+                    cur.copy_expert(copy_sql, f)
+
+    print(f"[OK] Saved CSV → {out_csv}")
 
 def main():
-    # --- ШАГ 1: query_2.sql (БД2) — редкости + золото из событий ---
-    if not SQL2_FILE.exists():
-        raise FileNotFoundError("Нет файла query_2.sql рядом со скриптом.")
-    sql2 = SQL2_FILE.read_text(encoding="utf-8")
-    df2 = fetch_df(DB2_URL, sql2)  # без params
+    # валидация переменных
+    for v, name in [(DB_HOST, "DB1_HOST"), (DB_NAME, "DB1_NAME"), (DB_PASS, "DB1_PASSWORD"), (DB_USER, "DB1_USER")]:
+        if not v:
+            die(f"Missing required env var: {name}")
+    if USE_SSH and (not SSH_HOST or not SSH_USER):
+        die("USE_SSH=true, но не заданы SSH1_HOST/SSH1_USER.")
 
-    if df2.empty:
-        # Пустые CSV, если никто не открывал гачу
-        pd.DataFrame(columns=["username","gold","userid"]).to_csv(OUT_GOLD, index=False, encoding="utf-8")
-        pd.DataFrame(columns=["rank","username","score","gold","rares","epics","legendaries","userid"]).to_csv(
-            OUT_TOTAL, index=False, encoding="utf-8"
-        )
-        print(f"[query_2] Пусто. Созданы {OUT_GOLD} и {OUT_TOTAL}.")
-        return
-
-    df2 = norm_lower(df2)
-    df2 = ensure_userid(df2)
-    for k in ("rares","epics","legendaries","gold"):
-        if k not in df2.columns: df2[k] = 0
-    # типы
-    df2[["rares","epics","legendaries"]] = df2[["rares","epics","legendaries"]].fillna(0).astype(int)
-    df2["gold"] = pd.to_numeric(df2["gold"], errors="coerce").fillna(0)
-
-    user_ids = [str(u) for u in pd.unique(df2["userid"]).tolist()]
-    if not user_ids:
-        pd.DataFrame(columns=["username","gold","userid"]).to_csv(OUT_GOLD, index=False, encoding="utf-8")
-        pd.DataFrame(columns=["rank","username","score","gold","rares","epics","legendaries","userid"]).to_csv(
-            OUT_TOTAL, index=False, encoding="utf-8"
-        )
-        print("[query_2] Нет userId.")
-        return
-
-    # --- ШАГ 2: query_1.sql (БД1) — отфильтровать допустимых + получить username ---
-    if not SQL1_FILE.exists():
-        raise FileNotFoundError("Нет файла query_1.sql рядом со скриптом.")
-    sql1 = SQL1_FILE.read_text(encoding="utf-8").strip()
-    params = (user_ids,)  # ANY(%s)
-    df1 = fetch_df(DB1_URL, sql1, params=params, retries=3, delay=3)
-
-    if df1.empty:
-        # никто не прошёл фильтры
-        pd.DataFrame(columns=["username","gold","userid"]).to_csv(OUT_GOLD, index=False, encoding="utf-8")
-        pd.DataFrame(columns=["rank","username","score","gold","rares","epics","legendaries","userid"]).to_csv(
-            OUT_TOTAL, index=False, encoding="utf-8"
-        )
-        print("[query_1] Никто не прошёл фильтры.")
-        return
-
-    df1 = norm_lower(df1)
-    if "userid" not in df1.columns:
-        for c in list(df1.columns):
-            if c.strip('"').lower() in ("userid","user id","user_id"):
-                df1 = df1.rename(columns={c:"userid"})
-                break
-    if "username" not in df1.columns:
-        raise RuntimeError("[query_1] Нет колонки 'username'.")
-
-    # Приведём ключ к строке
-    df1["userid"] = df1["userid"].astype("string")
-    df2["userid"] = df2["userid"].astype("string")
-
-    # --- МЕРДЖ: username + (gold/rares/epics/legendaries) ---
-    total = df1.merge(df2[["userid","gold","rares","epics","legendaries"]], on="userid", how="left")
-    total[["gold","rares","epics","legendaries"]] = total[["gold","rares","epics","legendaries"]].fillna(0)
-    total["gold"] = pd.to_numeric(total["gold"], errors="coerce").fillna(0)
-
-    # user_gold.csv (для совместимости/проверки)
-    total[["username","gold","userid"]].to_csv(OUT_GOLD, index=False, encoding="utf-8")
-    print(f"Сохранено {len(total)} строк в {OUT_GOLD}")
-
-    # --- score и rank ---
-    bonus_pct = 0.001*pd.to_numeric(total["rares"]) + 0.006*pd.to_numeric(total["epics"]) + 0.03*pd.to_numeric(total["legendaries"])
-    total["score"] = total["gold"] * (1.0 + bonus_pct)
-
-    total = total.sort_values(["score","gold"], ascending=[False,False], kind="mergesort").reset_index(drop=True)
-    total.insert(0, "rank", total.index + 1)
-
-    total = total[["rank","username","score","gold","rares","epics","legendaries","userid"]]
-    total.to_csv(OUT_TOTAL, index=False, encoding="utf-8")
-    print(f"Сохранено {len(total)} строк в {OUT_TOTAL}")
+    sql = read_sql(SQL_FILE)
+    run_query_to_csv(sql, OUTPUT_CSV)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
+    main()
