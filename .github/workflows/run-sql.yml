@@ -3,6 +3,9 @@ name: Run SQL and export CSV
 on:
   workflow_dispatch: {}  # ручной запуск
 
+permissions:
+  contents: write  # нужно, чтобы пушить изменения в репозиторий
+
 jobs:
   run-query:
     runs-on: ubuntu-latest
@@ -11,6 +14,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -20,7 +26,7 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          # Пины: sshtunnel 0.4.0 несовместим с новыми Paramiko
+          # пины: sshtunnel 0.4.0 несовместим с новыми paramiko
           pip install "psycopg2-binary==2.9.9" "sshtunnel==0.4.0" "paramiko==3.3.1"
 
       - name: Run query (data.sql → raw_data.csv)
@@ -31,11 +37,11 @@ jobs:
           DB1_PASSWORD: ${{ secrets.DB1_PASSWORD }}
           DB1_PORT: ${{ secrets.DB1_PORT }}
           DB1_USER: ${{ secrets.DB1_USER }}
-          DB1_SSLMODE: ${{ secrets.DB1_SSLMODE }} # опционально, например "require"
-          # Таймаут запроса на стороне PostgreSQL (мс). 0 = без лимита.
+          DB1_SSLMODE: ${{ secrets.DB1_SSLMODE }}       # опционально, например "require"
+          # Таймаут запроса (мс) — 0 = без лимита
           DB1_STATEMENT_TIMEOUT_MS: ${{ secrets.DB1_STATEMENT_TIMEOUT_MS }}
           # SSH (если нужен бастион)
-          USE_SSH: ${{ secrets.USE_SSH }}         # "true"/"false"
+          USE_SSH: ${{ secrets.USE_SSH }}               # "true"/"false"
           SSH1_HOST: ${{ secrets.SSH1_HOST }}
           SSH1_PORT: ${{ secrets.SSH1_PORT }}
           SSH1_PRIVATE_KEY: ${{ secrets.SSH1_PRIVATE_KEY }}
@@ -46,7 +52,22 @@ jobs:
         run: |
           python run_query.py
 
-      - name: Upload CSV artifact
+      - name: Commit CSV to repo root
+        # коммитим только если файл реально изменился
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # актуализируем ветку на случай, если появились новые коммиты
+          git pull --rebase origin "${{ github.ref_name }}"
+          git add raw_data.csv
+          if git diff --staged --quiet; then
+            echo "No changes in raw_data.csv — skipping commit."
+          else
+            git commit -m "Update raw_data.csv [skip ci]"
+            git push origin HEAD:${{ github.ref_name }}
+          fi
+
+      - name: Upload CSV artifact (optional)
         uses: actions/upload-artifact@v4
         with:
           name: raw_data
