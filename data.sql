@@ -4,8 +4,8 @@
 WITH ewin AS (
   SELECT *
   FROM events
-  WHERE "createdAt" >= TIMESTAMP '2025-09-23 16:00:00'
-    AND "createdAt" <  TIMESTAMP '2025-09-29 16:00:00'
+  WHERE "createdAt" >= TIMESTAMP '2025-09-23 16:00:00+00'
+    AND "createdAt" <  TIMESTAMP '2025-09-29 16:00:00+00'
     AND "name" IN ('ClaimChallengesAction','UnlockChallengeAction','SpendGachaAction')
 ),
 
@@ -13,8 +13,8 @@ purple AS (
   SELECT
     e."userId",
     SUM(
-      COALESCE((e.payload::jsonb #>> '{output,purpleStones,amount}')::bigint, 0) +
-      COALESCE((e.payload::jsonb #>> '{output,rewards,purpleStones,amount}')::bigint, 0)
+      COALESCE(NULLIF(e.payload::jsonb #>> '{output,purpleStones,amount}','')::bigint, 0) +
+      COALESCE(NULLIF(e.payload::jsonb #>> '{output,rewards,purpleStones,amount}','')::bigint, 0)
     ) AS purple
   FROM ewin e
   WHERE e."name" IN ('ClaimChallengesAction','UnlockChallengeAction')
@@ -26,7 +26,9 @@ legend AS (
     e."userId",
     COUNT(*) FILTER (WHERE (item->>'rarity')::int = 2) AS legendaries
   FROM ewin e
-  CROSS JOIN LATERAL jsonb_array_elements(e.payload::jsonb->'output') AS item
+  CROSS JOIN LATERAL jsonb_array_elements(
+    COALESCE(e.payload::jsonb->'output', '[]'::jsonb)
+  ) AS item
   WHERE e."name" = 'SpendGachaAction'
   GROUP BY e."userId"
 )
@@ -39,4 +41,4 @@ SELECT
 FROM purple p
 FULL OUTER JOIN legend l
   ON p."userId" = l."userId"
-ORDER BY score DESC, purple DESC, legendaries DESC
+ORDER BY score DESC, purple DESC, legendaries DESC;
