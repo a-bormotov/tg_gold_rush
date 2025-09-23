@@ -12,5 +12,9 @@ SELECT
 FROM ids
 LEFT JOIN users u
   ON u.id::text = ids.id
- AND u."createdAt"::date <= DATE '2025-09-12'   -- фильтр по дате ТУТ, в ON
+-- здесь реально фильтруем: оставляем либо тех, у кого нет строки в users,
+-- либо у кого createdAt не позже отсечки
+WHERE
+  u.id IS NULL
+  OR u."createdAt"::date <= DATE '2025-09-12'   -- поставь нужную дату
 ORDER BY ids.ord;
