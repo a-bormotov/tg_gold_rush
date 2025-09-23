@@ -10,11 +10,9 @@ SELECT
   END AS "username",
   ids.ord
 FROM ids
-LEFT JOIN users u
+JOIN users u
   ON u.id::text = ids.id
--- здесь реально фильтруем: оставляем либо тех, у кого нет строки в users,
--- либо у кого createdAt не позже отсечки
 WHERE
-  u.id IS NULL
-  OR u."createdAt"::date <= DATE '2025-09-12'   -- поставь нужную дату
+  u."createdAt"::date <= DATE '2025-09-12'   -- поставь нужную дату (включительно)
+  AND ids.id NOT ILIKE 'line%'               -- исключаем ID, начинающиеся на "line"
 ORDER BY ids.ord;
