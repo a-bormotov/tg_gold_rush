@@ -13,6 +13,5 @@ FROM ids
 LEFT JOIN users u
   ON u.id::text = ids.id
 WHERE
-  u."createdAt" IS NULL
-  OR u."createdAt"::date <= DATE '2025-09-12'  -- оставить аккаунты созданные не позже этой даты
+  u."createdAt"::date <= DATE '2025-09-12'  -- оставить аккаунты созданные не позже этой даты
 ORDER BY ids.ord;
