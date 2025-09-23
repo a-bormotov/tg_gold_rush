@@ -14,5 +14,5 @@ LEFT JOIN users u
   ON u.id::text = ids.id
 WHERE
   u."createdAt" IS NULL
-  OR u."createdAt"::date <= DATE '2025-09-12'  -- <= поставь нужную дату
+  OR u."createdAt"::date >= DATE '2025-09-12'  -- <= поставь нужную дату
 ORDER BY ids.ord;
