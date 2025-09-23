@@ -31,6 +31,55 @@ def to_num(x):
     try: return Decimal(str(x))
     except Exception: return Decimal(0)
 
+def read_blacklist_ids(path: str) -> set[str]:
+    """Читает black_list.csv и возвращает set userId как строки. Если файла нет — пустой set."""
+    ids = set()
+    if not os.path.exists(path):
+        print(f"[INFO] Blacklist not found at {path} — skipping.")
+        return ids
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        # utf-8-sig — чтобы проглотить возможный BOM
+        reader = csv.DictReader(f)
+        fieldnames = [fn.strip() for fn in (reader.fieldnames or [])]
+        key = None
+        # ищем поле userId (в любом регистре/с кавычками)
+        for fn in fieldnames:
+            if fn.strip('"').strip().lower() in ("userid", "user_id", "user id"):
+                key = fn
+                break
+        if key is None:
+            # если нет заголовков — попробуем как обычный csv и взять первый столбец
+            f.seek(0)
+            reader2 = csv.reader(f)
+            header = next(reader2, None)
+            # если была шапка, вернёмся к DictReader; иначе забираем все строки по первой колонке
+            if header and len(header) > 0 and any(h for h in header):
+                # всё-таки была шапка — но без userId, тогда берём первый столбец по содержимому
+                # перечитываем файл для корректности
+                f.seek(0)
+                reader = csv.DictReader(f)
+                first = fieldnames[0] if fieldnames else None
+                for row in reader:
+                    if first in row:
+                        v = str(row[first]).strip()
+                        if v: ids.add(v)
+            else:
+                # без шапки: первая колонка — userId
+                for row in reader2:
+                    if not row: continue
+                    v = str(row[0]).strip()
+                    if v: ids.add(v)
+            print(f"[INFO] Loaded {len(ids)} blacklisted ids (no header).")
+            return ids
+
+        # нормальный случай — есть колонка userId
+        for row in reader:
+            v = str(row.get(key, "")).strip()
+            if v:
+                ids.add(v)
+    print(f"[INFO] Loaded {len(ids)} blacklisted ids from {path}.")
+    return ids
+
 # -------- SSH tunnel helper --------
 @contextmanager
 def ssh_tunnel_if_needed(use_ssh: bool, db_host: str, db_port: int,
@@ -121,6 +170,7 @@ def main():
     USER_SQL_FILE=os.getenv("USER_SQL_FILE","user_data.sql")# DB2 (с фильтром по createdAt)
     RAW_CSV=os.getenv("OUTPUT_CSV","raw_data.csv")
     RESULT_CSV=os.getenv("RESULT_CSV","result_data.csv")
+    BLACKLIST_FILE=os.getenv("BLACKLIST_CSV","black_list.csv")
     TOP_N=int(os.getenv("TOP_N","3000"))
 
     # validate
@@ -167,25 +217,42 @@ def main():
     j_uname = cols2.index("username")
     uname_by_id = {str(r[j_user]): (r[j_uname] or str(r[j_user])) for r in rows2}
     allowed_ids = set(uname_by_id.keys())
+    print(f"[INFO] Allowed after createdAt filter: {len(allowed_ids)} users.")
 
-    # 3) Оставляем только разрешённых
-    rows_filtered = [r for r in rows1 if str(r[i_user]) in allowed_ids]
+    # 3) Чёрный список (из корня)
+    blacklist_ids = read_blacklist_ids(BLACKLIST_FILE)
+    if blacklist_ids:
+        print(f"[INFO] Blacklist will exclude {len(blacklist_ids)} ids.")
 
-    # 4) Сортируем и берём TOP_N
+    # 4) Оставляем только разрешённых и не в чёрном списке
+    rows_filtered = []
+    removed_black = 0
+    for r in rows1:
+        uid = str(r[i_user])
+        if uid not in allowed_ids:
+            continue  # отфильтрован по createdAt
+        if uid in blacklist_ids:
+            removed_black += 1
+            continue
+        rows_filtered.append(r)
+    if blacklist_ids:
+        print(f"[INFO] Excluded by blacklist: {removed_black}")
+
+    # 5) Сортировка и TOP_N
     rows_sorted = sorted(
         rows_filtered,
         key=lambda r: (to_num(r[i_score])*-1, to_num(r[i_purple])*-1, to_num(r[i_leg])*-1, str(r[i_user]))
     )
     top_rows = rows_sorted[:TOP_N]
 
-    # 5) Итоговый CSV
+    # 6) Итоговый CSV
     result_cols = ["username","score","purple","legendaries","userId"]
     result_rows = []
     for r in top_rows:
         uid = str(r[i_user])
         uname = uname_by_id.get(uid, uid)
         result_rows.append([uname, r[i_score], r[i_purple], r[i_leg], uid])
-    save_csv(result_cols, result_rows, RESULT_CSV)
+    save_csv(result_cols, result_rows, os.getenv("RESULT_CSV","result_data.csv"))
 
 if __name__ == "__main__":
     main()
