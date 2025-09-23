@@ -1,8 +1,8 @@
 WITH ewin AS (
   SELECT *
   FROM events
-  WHERE "createdAt" >= TIMESTAMP '2025-09-23 16:00:00'
-    AND "createdAt" <  TIMESTAMP '2025-09-29 16:00:00'
+  WHERE "createdAt" >= TIMESTAMPTZ '2025-09-23 16:00:00+00'
+	AND "createdAt" <  TIMESTAMPTZ '2025-09-29 16:00:00+00'
     AND "name" IN ('ClaimChallengesAction','UnlockChallengeAction','SpendGachaAction')
 ),
 purple AS (
