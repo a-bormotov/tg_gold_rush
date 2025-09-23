@@ -9,6 +9,7 @@ from tempfile import NamedTemporaryFile
 import psycopg2
 from psycopg2.extras import execute_values
 
+# ------------- utils -------------
 def die(msg, code=1):
     print(f"[ERROR] {msg}", file=sys.stderr); sys.exit(code)
 
@@ -16,9 +17,21 @@ def bool_env(name, default=False):
     return os.getenv(name, str(default)).strip().lower() in ("1","true","yes","y","on")
 
 def read_sql(path: str) -> str:
-    if not os.path.exists(path): die(f"SQL file not found: {path}")
+    if not os.path.exists(path):
+        die(f"SQL file not found: {path}")
     return open(path, "r", encoding="utf-8").read().strip().rstrip(";")
 
+def save_csv(cols, rows, path):
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f); w.writerow(cols)
+        for r in rows: w.writerow(list(r))
+    print(f"[OK] Saved CSV → {path} ({len(rows)} rows)")
+
+def to_num(x):
+    try: return Decimal(str(x))
+    except Exception: return Decimal(0)
+
+# -------- SSH tunnel helper --------
 @contextmanager
 def ssh_tunnel_if_needed(use_ssh: bool, db_host: str, db_port: int,
                          ssh_host: str|None, ssh_port: int|None,
@@ -58,6 +71,7 @@ def ssh_tunnel_if_needed(use_ssh: bool, db_host: str, db_port: int,
             try: os.remove(key_path)
             except Exception: pass
 
+# ---------- DB helpers ----------
 def build_connect_kwargs(db_name=None, db_user=None, db_pass=None, sslmode=None, stmt_timeout_ms="0", dsn_url=None):
     if dsn_url:
         return {"dsn": dsn_url, "connect_timeout": 30, "options": f"-c statement_timeout={(stmt_timeout_ms or '0').strip() or '0'}"}
@@ -77,23 +91,19 @@ def run_select_rows(connect_kwargs, host, port, sql, params=None):
             rows = cur.fetchall()
     return cols, rows
 
-def save_csv(cols, rows, path):
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f); w.writerow(cols); [w.writerow(list(r)) for r in rows]
-    print(f"[OK] Saved CSV → {path} ({len(rows)} rows)")
-
+# --------------- main ---------------
 def main():
-    # ---- DB1
+    # DB1 (events/score)
     DB1_HOST=os.getenv("DB1_HOST"); DB1_NAME=os.getenv("DB1_NAME"); DB1_PASSWORD=os.getenv("DB1_PASSWORD")
     DB1_PORT=int(os.getenv("DB1_PORT","5432")); DB1_USER=os.getenv("DB1_USER")
     DB1_SSLMODE=os.getenv("DB1_SSLMODE"); DB1_STMT_MS=os.getenv("DB1_STATEMENT_TIMEOUT_MS","0")
 
-    # ---- DB2
+    # DB2 (users)
     DB2_HOST=os.getenv("DB2_HOST"); DB2_NAME=os.getenv("DB2_NAME"); DB2_PASSWORD=os.getenv("DB2_PASSWORD")
     DB2_PORT=int(os.getenv("DB2_PORT","5432")); DB2_USER=os.getenv("DB2_USER")
     DB2_SSLMODE=os.getenv("DB2_SSLMODE"); DB2_STMT_MS=os.getenv("DB2_STATEMENT_TIMEOUT_MS", DB1_STMT_MS)
 
-    # ---- SSH flags + creds
+    # SSH flags + creds
     USE_SSH_GLOBAL = bool_env("USE_SSH", False)
     USE_SSH_DB1 = bool_env("USE_SSH_DB1", USE_SSH_GLOBAL)
     USE_SSH_DB2 = bool_env("USE_SSH_DB2", USE_SSH_GLOBAL)
@@ -106,14 +116,14 @@ def main():
     SSH2_USER=os.getenv("SSH2_USER") or SSH1_USER
     SSH2_PRIVATE_KEY=os.getenv("SSH2_PRIVATE_KEY") or SSH1_PRIVATE_KEY
 
-    # ---- files
-    SQL_FILE=os.getenv("SQL_FILE","data.sql")
-    USER_SQL_FILE=os.getenv("USER_SQL_FILE","user_data.sql")
+    # files & limits
+    SQL_FILE=os.getenv("SQL_FILE","data.sql")               # DB1
+    USER_SQL_FILE=os.getenv("USER_SQL_FILE","user_data.sql")# DB2 (с фильтром по createdAt)
     RAW_CSV=os.getenv("OUTPUT_CSV","raw_data.csv")
     RESULT_CSV=os.getenv("RESULT_CSV","result_data.csv")
     TOP_N=int(os.getenv("TOP_N","3000"))
 
-    # ---- validation
+    # validate
     for v,n in [(DB1_HOST,"DB1_HOST"),(DB1_NAME,"DB1_NAME"),(DB1_PASSWORD,"DB1_PASSWORD"),(DB1_USER,"DB1_USER")]:
         if not v: die(f"Missing required env var: {n}")
     for v,n in [(DB2_HOST,"DB2_HOST"),(DB2_NAME,"DB2_NAME"),(DB2_PASSWORD,"DB2_PASSWORD"),(DB2_USER,"DB2_USER")]:
@@ -122,50 +132,58 @@ def main():
     sql1 = read_sql(SQL_FILE)
     sql2 = read_sql(USER_SQL_FILE)
 
-    # ---- DB1: основной запрос
+    # 1) DB1: все игроки за окно
     db1_kwargs = build_connect_kwargs(DB1_NAME, DB1_USER, DB1_PASSWORD, DB1_SSLMODE, DB1_STMT_MS)
     with ssh_tunnel_if_needed(USE_SSH_DB1, DB1_HOST, DB1_PORT, SSH1_HOST, SSH1_PORT, SSH1_USER, SSH1_PRIVATE_KEY) as (h1,p1,_):
         cols1, rows1 = run_select_rows(db1_kwargs, h1, p1, sql1)
     save_csv(cols1, rows1, RAW_CSV)
 
-    # столбцы и сортировка TOP_N
+    # Индексы
     try:
-        i_user = cols1.index("userId"); i_score = cols1.index("score"); i_purple = cols1.index("purple"); i_leg = cols1.index("legendaries")
+        i_user = cols1.index("userId")
+        i_score = cols1.index("score")
+        i_purple = cols1.index("purple")
+        i_leg   = cols1.index("legendaries")
     except ValueError as e:
         die(f"Expected columns not found in first query result: {e}")
 
-    def to_num(x):
-        try: return Decimal(str(x))
-        except Exception: return Decimal(0)
+    # Все userId (строками)
+    all_user_ids = [str(r[i_user]) for r in rows1]
 
-    rows_sorted = sorted(
-        rows1,
-        key=lambda r: (to_num(r[i_score])*-1, to_num(r[i_purple])*-1, to_num(r[i_leg])*-1, str(r[i_user]))
-    )
-    top_rows = rows_sorted[:TOP_N]
-    top_user_ids = [str(r[i_user]) for r in top_rows]  # строки
-
-    # ---- DB2: usernames без temp table (read-only friendly)
+    # 2) DB2: имена + фильтр по createdAt внутри SQL (user_data.sql)
     db2_kwargs = build_connect_kwargs(DB2_NAME, DB2_USER, DB2_PASSWORD, DB2_SSLMODE, DB2_STMT_MS)
     with ssh_tunnel_if_needed(USE_SSH_DB2, DB2_HOST, DB2_PORT, SSH2_HOST, SSH2_PORT, SSH2_USER, SSH2_PRIVATE_KEY) as (h2,p2,_):
         kw = dict(db2_kwargs); kw["host"]=h2; kw["port"]=int(p2)
         with psycopg2.connect(**kw) as conn:
             with conn.cursor() as cur:
-                # строим VALUES (id, ord), (id, ord), ...
-                data = [(uid, idx+1) for idx, uid in enumerate(top_user_ids)]
-                # user_data.sql содержит "WITH ids(id, ord) AS (VALUES %s) SELECT ..."
-                execute_values(cur, sql2, data, template="(%s,%s)")
+                pairs = [(uid, idx+1) for idx, uid in enumerate(all_user_ids)]
+                # user_data.sql содержит "WITH ids(id, ord) AS (VALUES %s) ..."
+                execute_values(cur, sql2, pairs, template="(%s,%s)")
                 cols2 = [d[0] for d in cur.description]
                 rows2 = cur.fetchall()
 
-    uname_by_id = {row[0]: row[1] for row in rows2}  # userId(text) -> username
+    # Разрешённые (после фильтра в SQL) и имена
+    j_user  = cols2.index("userId")
+    j_uname = cols2.index("username")
+    uname_by_id = {str(r[j_user]): (r[j_uname] or str(r[j_user])) for r in rows2}
+    allowed_ids = set(uname_by_id.keys())
 
-    # ---- финальный CSV
+    # 3) Оставляем только разрешённых
+    rows_filtered = [r for r in rows1 if str(r[i_user]) in allowed_ids]
+
+    # 4) Сортируем и берём TOP_N
+    rows_sorted = sorted(
+        rows_filtered,
+        key=lambda r: (to_num(r[i_score])*-1, to_num(r[i_purple])*-1, to_num(r[i_leg])*-1, str(r[i_user]))
+    )
+    top_rows = rows_sorted[:TOP_N]
+
+    # 5) Итоговый CSV
     result_cols = ["username","score","purple","legendaries","userId"]
     result_rows = []
     for r in top_rows:
         uid = str(r[i_user])
-        uname = uname_by_id.get(uid) or uid
+        uname = uname_by_id.get(uid, uid)
         result_rows.append([uname, r[i_score], r[i_purple], r[i_leg], uid])
     save_csv(result_cols, result_rows, RESULT_CSV)
 
