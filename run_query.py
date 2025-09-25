@@ -42,17 +42,15 @@ def read_blacklist_ids(path: str) -> set[str]:
     with open(path, "r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames:
-            # пытаемся найти колонку userId (в любом регистре/с пробелами/подчёркиванием)
             key = None
             for fn in reader.fieldnames:
                 if fn and fn.strip('"').strip().lower() in ("userid", "user_id", "user id"):
                     key = fn
                     break
             if key is None:
-                # берём первую колонку
                 f.seek(0)
                 reader = csv.reader(f)
-                next(reader, None)  # попытка пропустить хедер
+                next(reader, None)
                 for row in reader:
                     if row:
                         v = str(row[0]).strip()
@@ -64,7 +62,6 @@ def read_blacklist_ids(path: str) -> set[str]:
                     if v:
                         ids.add(v)
         else:
-            # csv без заголовков: первая колонка — userId
             f.seek(0)
             reader = csv.reader(f)
             for row in reader:
@@ -131,7 +128,7 @@ def build_connect_kwargs(db_name=None, db_user=None, db_pass=None, sslmode=None,
         kw["sslmode"] = sslmode
     return kw
 
-def run_select_rows(connect_kwargs, host, port, sql, search_path_env: str | None):
+def run_select_rows(connect_kwargs, host, port, sql, search_path_env: str | None, tag: str):
     kw = dict(connect_kwargs)
     kw["host"] = host
     kw["port"] = int(port)
@@ -140,12 +137,11 @@ def run_select_rows(connect_kwargs, host, port, sql, search_path_env: str | None
             cur.execute("SET TIME ZONE 'UTC'")
             if search_path_env:
                 cur.execute(f"SET search_path = {search_path_env}")
-            # диагностика
             cur.execute("SHOW TIME ZONE"); tz = cur.fetchone()[0]
             cur.execute("SHOW search_path"); sp_now = cur.fetchone()[0]
             cur.execute("SELECT current_database(), current_user")
             dbname, dbuser = cur.fetchone()
-            print(f"[DB] db={dbname} user={dbuser} tz={tz} search_path={sp_now}")
+            print(f"[{tag}] db={dbname} user={dbuser} tz={tz} search_path={sp_now}")
 
             cur.execute(sql)
             cols = [d[0] for d in cur.description]
@@ -155,9 +151,9 @@ def run_select_rows(connect_kwargs, host, port, sql, search_path_env: str | None
 # ------------------ main ------------------
 
 def main():
-    # файлы
+    # файлы/лимиты
     SQL_FILE = os.getenv("SQL_FILE", "data.sql")                # DB1
-    USER_SQL_FILE = os.getenv("USER_SQL_FILE", "user_data.sql") # DB2
+    USER_SQL_FILE = os.getenv("USER_SQL_FILE", "user_data.sql") # DB2 (WITH ids(id, ord) AS (VALUES %s) ...)
     RAW_CSV = os.getenv("OUTPUT_CSV", "raw_data.csv")
     RESULT_CSV = os.getenv("RESULT_CSV", "result_data.csv")
     BLACKLIST_FILE = os.getenv("BLACKLIST_CSV", "black_list.csv")
@@ -180,7 +176,7 @@ def main():
 
     if DB1_URL:
         db1_kwargs = {"dsn": DB1_URL, "connect_timeout": 30, "options": f"-c statement_timeout={DB1_STMT_MS or '0'}"}
-        host_for_db1 = "localhost"; port_for_db1 = 5432  # не используется, но обязателен для интерфейса
+        host_for_db1 = "localhost"; port_for_db1 = 5432
     else:
         for v, n in [(DB1_HOST, "DB1_HOST"), (DB1_NAME, "DB1_NAME"), (DB1_USER, "DB1_USER"), (DB1_PASSWORD, "DB1_PASSWORD")]:
             if not v: die(f"Missing env: {n}")
@@ -188,7 +184,7 @@ def main():
         host_for_db1 = DB1_HOST; port_for_db1 = DB1_PORT
 
     with ssh_tunnel_if_needed(USE_SSH_DB1, host_for_db1, port_for_db1, SSH1_HOST, SSH1_PORT, SSH1_USER, SSH1_PRIVATE_KEY) as (h1, p1, _):
-        cols1, rows1 = run_select_rows(db1_kwargs, h1, p1, sql1, DB1_SEARCH_PATH)
+        cols1, rows1 = run_select_rows(db1_kwargs, h1, p1, sql1, DB1_SEARCH_PATH, "DB1")
 
     # Сохраняем сырые результаты
     save_csv(cols1, rows1, RAW_CSV)
@@ -208,7 +204,6 @@ def main():
     except ValueError as e:
         die(f"Expected columns in raw_data: userId, score, purple, legendaries. Details: {e}")
 
-    # список userId
     user_ids = [str(r[i_user]) for r in rows1]
     if not user_ids:
         save_csv(["username", "score", "purple", "legendaries", "userId"], [], RESULT_CSV)
@@ -238,29 +233,59 @@ def main():
         db2_kwargs = build_connect_kwargs(DB2_NAME, DB2_USER, DB2_PASSWORD, DB2_SSLMODE, DB2_STMT_MS)
         host_for_db2 = DB2_HOST; port_for_db2 = DB2_PORT
 
-    with ssh_tunnel_if_needed(USE_SSH_DB2, host_for_db2, port_for_db2, SSH2_HOST, SSH2_PORT, SSH2_USER, SSH2_PRIVATE_KEY) as (h2, p2, _):
-        kw = dict(db2_kwargs); kw["host"] = h2; kw["port"] = int(p2)
-        with psycopg2.connect(**kw) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SET TIME ZONE 'UTC'")
-                if DB2_SEARCH_PATH:
-                    cur.execute(f"SET search_path = {DB2_SEARCH_PATH}")
-                # пары (id, ord) для VALUES %s
-                pairs = [(uid, idx + 1) for idx, uid in enumerate(user_ids)]
-                execute_values(cur, sql2, pairs, template="(%s,%s)", page_size=15000)
-                cols2 = [d[0] for d in cur.description]
-                rows2 = cur.fetchall()
+    def fetch_usernames_with_values(pairs):
+        """Исполняет user_data.sql с VALUES %s корректно: либо одним заходом, либо чанками и аккумулирует результат."""
+        with ssh_tunnel_if_needed(USE_SSH_DB2, host_for_db2, port_for_db2, SSH2_HOST, SSH2_PORT, SSH2_USER, SSH2_PRIVATE_KEY) as (h2, p2, _):
+            kw = dict(db2_kwargs); kw["host"] = h2; kw["port"] = int(p2)
+            with psycopg2.connect(**kw) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SET TIME ZONE 'UTC'")
+                    if DB2_SEARCH_PATH:
+                        cur.execute(f"SET search_path = {DB2_SEARCH_PATH}")
 
-    # карта userId -> username (уже нормализованный в SQL)
+                    total_pairs = len(pairs)
+                    # предел по числу параметров в одном запросе (Postgres ~65535)
+                    # на пару приходится 2 параметра (%s,%s)
+                    MAX_PARAMS = 60000
+                    max_pairs_per_stmt = max(1, min(total_pairs, MAX_PARAMS // 2))
+
+                    rows_acc = []
+                    cols_out = None
+                    start = 0
+                    while start < total_pairs:
+                        end = min(total_pairs, start + max_pairs_per_stmt)
+                        chunk = pairs[start:end]
+                        # ВАЖНО: page_size=len(chunk) — заставляем выполнить ОДИН раз на chunk
+                        execute_values(cur, sql2, chunk, template="(%s,%s)", page_size=len(chunk))
+                        cols = [d[0] for d in cur.description]
+                        if cols_out is None:
+                            cols_out = cols
+                        rows_acc.extend(cur.fetchall())
+                        start = end
+
+                    # сортируем по ord, чтобы восстановить общий порядок
+                    try:
+                        j_ord = cols_out.index("ord")
+                        rows_acc.sort(key=lambda r: int(r[j_ord]))
+                    except Exception:
+                        pass
+
+                    return cols_out, rows_acc
+
+    # формируем (id, ord)
+    pairs = [(uid, idx + 1) for idx, uid in enumerate(user_ids)]
+    cols2, rows2 = fetch_usernames_with_values(pairs)
+
+    # карта userId -> username
     try:
         j_user = cols2.index("userId")
         j_uname = cols2.index("username")
     except ValueError as e:
-        die(f"user_data.sql must return columns: userId, username. Details: {e}")
+        die(f"user_data.sql must return columns: userId, username (and ord). Details: {e}")
 
     uname_by_id = {str(r[j_user]): (r[j_uname] or str(r[j_user])) for r in rows2}
     allowed_ids = set(uname_by_id.keys())
-    print(f"[INFO] Allowed after DB2 filters: {len(allowed_ids)}")
+    print(f"[INFO] Allowed after DB2 filters: {len(allowed_ids)} / input={len(user_ids)}")
 
     # ---------- blacklist ----------
     black_ids = read_blacklist_ids(BLACKLIST_FILE)
